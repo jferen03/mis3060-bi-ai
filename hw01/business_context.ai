@@ -1,0 +1,7 @@
+Part 2 - Business Context Exploration
+
+Prompt: “If the economy enters a recession, different parts of the loan portfolio may react very differently. Which loan purposes would you expect to deteriorate first, and what leading indicators could help the portfolio committee identify that shift before delinquencies and charge-offs start increasing?”
+
+Consildated response: In a downturn, loan performance typically deteriorates in stages, with Personal and Business loans often showing stress first, followed by Auto, Home Improvement, and Education, although Wildcat’s current portfolio differs from this theoretical pattern. Wildcat’s Home Improvement portfolio currently has the highest delinquency/default rate (17.7%), while Business has the lowest rate but carries significantly larger average balances, making individual defaults more impactful in dollar terms. A portfolio committee should therefore monitor both deterioration rates and dollar exposure, rather than focusing solely on delinquency percentages. Key early-warning indicators include roll rates, partial payments, hardship requests, NSF activity, declining credit quality, unemployment trends, business conditions, and collateral values, allowing the committee to identify stress before defaults and charge-offs accelerate.
+
+My follow-up question: If early-warning indicators begin signaling stress in multiple segments at once, how should the portfolio committee determine which risks require immediate action versus continued monitoring?
