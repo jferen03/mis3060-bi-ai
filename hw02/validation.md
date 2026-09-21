@@ -1,6 +1,6 @@
 # HW02 Validation: `fact_transactions.csv`
 
-THIS IS 2A: Known-Answer Benchmarks!!!
+### 2A: Known-Answer Benchmarks
 
 Values below come from running `hw02/hw02_eda.py` from the repository root (see `hw02/hw02_profile.txt` and the console output).
 
@@ -39,7 +39,7 @@ Values below come from running `hw02/hw02_eda.py` from the repository root (see 
 - **Why it isn't a data problem:** the underlying value is identical in both places. The expected 41,220.48 and the script's 41,220.49 are the same number, 41,220.485, rounded two different ways. The one-cent difference is only display rounding.
 - **Conclusion:** the data and the calculation are correct. If an exact match to $41,220.48 is required, ask Claude Cowork to round the median with the same method as the benchmark (round half to even) so both places agree.
 
-THIS IS 2B: Explain the Code and Output!!!
+### 2B: Explain the Code and Output
 
 1. After looking through the terminal vs the output that Claude expected, there is not a singular thing that is different. Every single number is exactly the same and the output tables look ide3ntical as well. Even the rounding is exactly the same.
 
@@ -97,3 +97,23 @@ If you can't resolve it, exclude them from share-based analysis. That means the 
 If you do null them, do it in a cleaned copy, never the raw file. Document the count (836) and the reason, and keep the flag so the change is traceable.
 
 Whichever option you pick, do the cleaning in a separate script or step so the raw data stays reproducible.
+
+### 2C: Business Check & Cross-Validation
+
+1. I would expect Deposit, Withdraw, and Advisory Fee to all have no movements. They are all at the account level so inherintly there would be no secuirty, share count, or price to record. The counts of the three: 35981, 29850, and 35766 do add up to the 101597 number.
+
+2. I personally am only aware of 4 reasons why there would be a signifcant more amount of Buys then Sells in such a lengthy sample. First, if there is a strong macroeconomic environment, meaning that there is a positive outlook on the economy for the future, people will likley be buying more then selling. Second, and it is in tandem with public outlook, but if the economy is generally strong, people will have more money to inve4st than before. Third, we can just see a general chnage in preference to a more buy and hold perspective rather than a buy and sell one. Finally, we can see general reinvestment. With this I mean dividends can be but back into new purchases.
+
+3. One thing that could go wrong is that any math would cause an error. Subtracting one date from another on strings raises an error because python can't subtract text. Nothing would get computed.
+
+4. I think that it is an extremely plausible client to advisor ratio. I think it also depends on the size of the client and since 108 is the average, it's difficult if it's truly plausible.
+
+5. One plausible explanation is that there was a data-entry error. Either someone labeled them as buys when they should have been sells or someone accidently typed in the negative sign in front of all the values. I would assume the former to be more likely. The other explanation is a more business front one. Teh firm could have booked a negative Buy in an effort to cancel or adjust an earlier Buy that was incorrect. 
+
+6. Prompt A Return: Rows where txn_type is exactly 'Buy': 83,556 | Prompt B Return: Total rows:                  298,772
+Rows of excluded types:      215,216
+Total minus excluded types:  83,556
+
+7. They are both correct but the second prompt just shows it work more. 
+
+8. Counting a second way gives you a check on the first. If the "Buy" filter missed something like "buy" or "Buy " with a stray space, the two numbers wouldn't match. They both came out to 83,556, so the count is solid, though it doesn't tell you the data itself is right.
