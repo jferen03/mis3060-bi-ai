@@ -2,7 +2,7 @@ Assignment: HW 3
 Student: Jack Ference
 Date: 9/29/2026
 
-## Prompts sent to Claude Cowork
+## Prompts I sent to Claude Cowork
 
 ### 1. Specification A: Earnings pipeline (Item 2.02)
 
@@ -46,7 +46,7 @@ Summary. At the end, print the total number of rows written and the number of NO
 
 
 
-Output: `hw03_earnings.py` → `earnings_history.csv` (20 rows, 4 per company)
+This one produced `hw03_earnings.py`, which wrote `earnings_history.csv` (20 rows, 4 per company).
 
 ### 2. Specification B: Executive events pipeline (Item 5.02)
 
@@ -90,7 +90,7 @@ Output: `hw03_earnings.py` → `earnings_history.csv` (20 rows, 4 per company)
 
 8. **Summary.** At the end, print the total number of events written, the number of events per company (including companies with zero), and the number of `NOT_FOUND` values in each field column.
 
-Output: `hw03_executives.py` → `executive_events.csv` (32 rows)
+This one produced `hw03_executives.py`, which wrote `executive_events.csv` (32 rows).
 
 ### 3. Timeline prompt
 
@@ -101,21 +101,19 @@ Output: `hw03_executives.py` → `executive_events.csv` (32 rows)
 > 4. Print a summary: for each company, list any executive events and whether they occurred before or after the nearest earnings announcement.
 > 5. Print a final count: how many events occurred before vs. after an earnings announcement across all five companies.
 
-Output: `hw03_timeline.py` → `corporate_events_timeline.csv` (32 rows)
+This gave me `hw03_timeline.py` and `corporate_events_timeline.csv` (32 rows). After looking at the output, I followed up with: *"can you fix the name matching in hw03_executives.py"*
 
-Follow-up prompt: *"can you fix the name matching in hw03_executives.py"*
+## Which extractions needed another round
 
-## Extractions that required iteration
+The earnings side worked on the first try. All five companies came back with a period, revenue, EPS and net income, and there were zero `NOT_FOUND` values.
 
-The earnings extraction (Specification A) worked on the first run for all five companies, with 0 `NOT_FOUND` values for period, revenue, EPS and net income.
+The executive events side was a different story. Once I looked at the CSV, a lot of the "names" obviously weren't people, so I had Claude go back and fix the name matching. In the end, every company's results changed:
 
-The executive events extraction (Specification B) needed a follow-up round of regex fixes, and the changes affected all five companies:
+- **NVIDIA:** one of the names was "Worldwide Field," which is actually part of a job title (Executive Vice President, Worldwide Field Operations). Suzanne Nora Johnson also showed up twice, once as just "Nora Johnson." After the fix, the real name (Ajay K. Puri) shows up and Johnson is only listed once.
+- **Walmart:** it picked up "Covenant Not" and "Non-Competition Agreements" as people, which was pretty funny. Those are gone now, but Walmart still has a few people listed more than once in the same filing.
+- **Microsoft:** every row said `both` with no name. It turned out the script was reading the Item 5.02 heading itself ("Departure of Directors... Appointment of Certain Officers") as if it described an event. Now the compensation-only filings correctly show `NOT_FOUND`, but the script still can't pull Microsoft names.
+- **JPMorgan and Apple:** the script was splitting sentences after every "Mr." or "Ms.," so names were getting cut in half. Fixing that picked up Todd A. Combs and Doug Petno at JPMorgan, and got rid of a fake "Tim Cook, senior vice president" row at Apple.
 
-- **NVIDIA:** picked up "Worldwide Field" (from the title "Executive Vice President, Worldwide Field Operations") as a person's name, and listed Suzanne Nora Johnson twice (once as "Nora Johnson"). After the fix, the rows show Ajay K. Puri and one Suzanne Nora Johnson row.
-- **Walmart:** picked up contract phrases ("Covenant Not", "Non-Competition Agreements") as names. These rows are gone after the fix, but Walmart still lists some people more than once in the same filing.
-- **Microsoft:** every row came out as `both` with no name, because the section still included the Item 5.02 heading ("Departure of Directors... Appointment of Certain Officers"). After the fix, three filings correctly show `NOT_FOUND` (compensation-only), but Microsoft names are still not extracted.
-- **JPMorgan and Apple:** a bug in the sentence splitter broke sentences after "Mr.", "Ms." and middle initials, cutting names in half. After the fix, JPMorgan picked up Todd A. Combs and Doug Petno, and a false "Tim Cook, senior vice president" appointment disappeared from Apple.
+## Something the script did that I wouldn't have thought to ask for
 
-## Something the script did that I would not have thought to specify
-
-To tell real names apart from capitalized phrases, the fixed script only accepts a name if the filing also refers to that person as "Mr./Ms./Mrs./Dr. [surname]" somewhere in the Item 5.02 section. If the filing never uses those titles, it falls back to a list of words that can't be names. I wouldn't have thought to specify this, but it matches how 8-Ks are written: they introduce someone by full name, then call them "Mr. Surname" afterward. It was mostly correct, since it removed every fake name. It still needs checking, though. Apple's April 2026 CEO transition filing went from three rows (Tim Cook, John Ternus, Art Levinson) to one (John Ternus), so the rule or the other fixes may now be dropping real people. That filing should be checked against the actual 8-K.
+The fixed script only counts something as a name if the filing also refers to that person as "Mr." or "Ms." plus their last name somewhere else. I never would have thought to spell that out, but it makes sense: 8-Ks introduce someone by full name and then call them "Mr. Smith" for the rest of the filing. For the most part it worked, because every fake name disappeared. I'm not fully sure it's right, though. Apple's April 2026 CEO filing used to have three people (Tim Cook, John Ternus and Art Levinson) and now it only has John Ternus. So it might be throwing out some real people too, and I'd want to check that filing myself before trusting it completely.

@@ -12,11 +12,11 @@ Both scripts process the same five companies. Define them once at the top of eac
 
 | company | ticker | cik |
 |---|---|---|
-| _TODO_ | _TODO_ | _TODO_ |
-| _TODO_ | _TODO_ | _TODO_ |
-| _TODO_ | _TODO_ | _TODO_ |
-| _TODO_ | _TODO_ | _TODO_ |
-| _TODO_ | _TODO_ | _TODO_ |
+| Apple Inc. | AAPL | 0000320193 |
+| Microsoft Corporation | MSFT | 0000789019 |
+| NVIDIA Corporation | NVDA | 0001045810 |
+| JPMorgan Chase & Co. | JPM | 0000019617 |
+| Walmart Inc. | WMT | 0000104169 |
 
 - Store the CIK as a string. When building the submissions URL, zero-pad it to 10 digits (for example, `320193` becomes `0000320193`).
 - When building Archive URLs (filing index and documents), use the CIK **without** leading zeros.
