@@ -17,7 +17,8 @@ Every L-entry in the log (leave as is) is recorded in the cleaning log too.
 Rules
 - Raw files are read as text (dtype=str, keep_default_na=False) and never modified.
 - After each step: print rows affected + before/after check, then assert the after-state.
-  A failed assert stops the script, so no clean files are written from a bad fix.
+  A failed assert stops the script. All checks (each step, final checks, pre-write checks)
+  run before any file is written, so no clean or audit file is written from a bad fix.
 - Every changed cell -> data/audit/value_changes.csv
 - Every removed row  -> data/audit/quarantine_<set>.csv, and raw = clean + quarantined is proven.
 
@@ -29,6 +30,7 @@ Optional: python scripts/02_clean.py --data "path/to/raw/folder"
 import argparse
 import glob
 import os
+import re
 import sys
 from decimal import Decimal
 
@@ -69,11 +71,29 @@ RISK_TO_BENCHMARK = {"Aggressive": "1", "Moderately Aggressive": "1", "Balanced"
                      "Conservative": "8", "Moderately Conservative": "8"}
 EXTREME_HIGH, EXTREME_LOW = 1.0, -0.5   # YTD return bounds for extreme_return_flag
 AUM_FLOOR = "1000.0"
+SECURITY_TXN_TYPES = ["Buy", "Sell", "Dividend"]
+
+# Row counts the decision log commits to. Each step asserts its count, so a fix that touches
+# more or fewer rows than the log claims stops the script (review finding 02-#5).
+EXPECTED = {"D01": 197175, "D03": 25, "D04": 77, "D05": 75, "D02": 200, "D07": 835, "D06": 300,
+            "D08 fact_portfolio_snapshot": 420, "D08 fact_fees": 386, "D09": 2639}
+# which (table, column) each value-changing step writes - used to reconcile value_changes.csv per step
+STEP_COLUMN = {"D01": ("fact_transactions", "security_id"), "D04": ("dim_client", "state"),
+               "D05": ("dim_client", "risk_profile"), "D07": ("fact_transactions", "shares"),
+               "D06": ("fact_portfolio_snapshot", "return_ytd")}
 
 # --------------------------------------------------------------------------
 # Audit-trail helpers
 # --------------------------------------------------------------------------
 CLEAN_LOG, VALUE_CHANGES, QUARANTINE = [], [], {}
+
+
+def expect(step, n):
+    assert n == EXPECTED[step], f"{step}: touched {n} rows, decision log says {EXPECTED[step]}"
+
+
+def is_blank(s):
+    return s.astype(str).str.strip() == ""
 
 
 def log(table, decision_id, issue, action, rows, note=""):
@@ -85,7 +105,9 @@ def record_changes(table, df, mask, column, new_values):
     """Write new values into df[column] for mask and log every changed cell."""
     key = PK[table]
     old = df.loc[mask, column]
-    new = pd.Series(new_values, index=old.index).astype(str)
+    new = pd.Series(new_values, index=old.index)
+    assert new.notna().all(), f"{table}.{column}: a mapping produced a missing value"
+    new = new.astype(str)
     changed = old != new
     VALUE_CHANGES.append(pd.DataFrame({
         "table": table, "key_column": key, "key": df.loc[old.index[changed], key].values,
@@ -121,7 +143,8 @@ def find_file(data_dir, table):
     exact = os.path.join(data_dir, table + ".csv")
     if os.path.exists(exact):
         return exact
-    hits = sorted(glob.glob(os.path.join(data_dir, glob.escape(table) + " (*).csv")))
+    hits = glob.glob(os.path.join(data_dir, glob.escape(table) + " (*).csv"))
+    hits = sorted(hits, key=lambda h: int(re.search(r"\((\d+)\)\.csv$", h).group(1)))   # (10) after (9)
     return hits[-1] if hits else None
 
 
@@ -141,7 +164,7 @@ def d01_security_id(t):
     header("D01  fact_transactions.security_id  '45.0' -> '45'")
     tx = t["fact_transactions"]
     sid = tx["security_id"]
-    nonblank = sid != ""
+    nonblank = ~is_blank(sid)
     float_like = sid.str.fullmatch(r"\d+\.0")
     dim_ids = set(t["dim_security"]["security_id"])
     before_match = sid[nonblank].isin(dim_ids).mean()
@@ -159,6 +182,7 @@ def d01_security_id(t):
     assert n == float_like.sum()
     assert after[after != ""].str.fullmatch(r"\d+").all()
     assert after_match == 1.0, "security_id still has orphans after normalising"
+    expect("D01", n)
     assert (after == "").sum() == (~nonblank).sum(), "blank count changed"
     log("fact_transactions", "D01", "security_id stored as float text ('45.0')",
         "convert: strip trailing .0", n, f"RI match {before_match:.2%} -> {after_match:.2%}")
@@ -199,6 +223,7 @@ def d03_duplicate_clients(t):
     assert len(after) + mask.sum() == len(cl)
     assert after.duplicated(match_cols).sum() == 0
     assert after["client_id"].isin(fact_ids).all(), "a remaining client has no facts"
+    expect("D03", int(mask.sum()))
     log("dim_client", "D03", "duplicate client rows (same attributes, typo'd last name)",
         "quarantine copy (higher id)", mask.sum(),
         "verified: copies have 0 fact rows, originals all have facts -> no FK remap needed")
@@ -207,8 +232,16 @@ def d03_duplicate_clients(t):
 def d04_state(t):
     header("D04  dim_client.state full names -> USPS codes")
     cl = t["dim_client"]
-    before_counts = cl["state"].replace(STATE_MAP).value_counts()
     full = cl["state"].isin(STATE_MAP)
+    # independent check of the mapping: every target code must already be used by other rows
+    # (catches a typo such as 'Pennsylvania' -> 'PN', which would still be 2 capital letters)
+    existing_codes = set(cl.loc[~full, "state"])
+    assert set(STATE_MAP.values()) <= existing_codes, \
+        f"STATE_MAP targets not used anywhere else: {set(STATE_MAP.values()) - existing_codes}"
+    # expected totals counted BEFORE mapping: code rows + full-name rows, by the code each name maps to
+    code_counts = cl.loc[~full, "state"].value_counts()
+    name_counts = cl.loc[full, "state"].value_counts().rename(index=STATE_MAP).groupby(level=0).sum()
+    before_counts = code_counts.add(name_counts, fill_value=0).astype(int)
     print(f"  before: {full.sum()} full names: {cl.loc[full, 'state'].value_counts().to_dict()}")
     assert (cl.loc[~full, "state"].str.fullmatch(r"[A-Z]{2}")).all(), "unmapped non-code state found"
     n = record_changes("dim_client", cl, full, "state", cl.loc[full, "state"].map(STATE_MAP))
@@ -217,6 +250,8 @@ def d04_state(t):
           f"PA count {after_counts.get('PA', 0)}")
     assert cl["state"].str.fullmatch(r"[A-Z]{2}").all()
     assert after_counts.sort_index().equals(before_counts.sort_index()), "per-state totals do not add up"
+    assert set(after_counts.index) == existing_codes, "mapping created a new state code"
+    expect("D04", n)
     log("dim_client", "D04", "state stored as full name", "standardize to USPS code", n,
         "per-state count = old code count + old full-name count")
 
@@ -224,17 +259,20 @@ def d04_state(t):
 def d05_risk_profile(t):
     header("D05  dim_client.risk_profile blank -> fill from benchmark rule + flag")
     cl, sn = t["dim_client"], t["fact_portfolio_snapshot"]
-    blank = cl["risk_profile"] == ""
+    blank = is_blank(cl["risk_profile"])
     print(f"  before: {blank.sum()} blank risk_profile")
 
     # reconcile: confirm the rule risk_profile -> benchmark on clients that HAVE a profile
     m = sn.merge(cl[["client_id", "risk_profile"]], on="client_id")
-    known = m[m["risk_profile"] != ""]
+    known = m[~is_blank(m["risk_profile"])]
     rule_holds = (known["benchmark_id"] == known["risk_profile"].map(RISK_TO_BENCHMARK)).mean()
     print(f"  rule check on {len(known):,} snapshots of known profiles: {rule_holds:.2%} follow the rule")
     assert rule_holds == 1.0, "risk_profile -> benchmark rule does not hold; fill would be a guess"
-    inverse = {"3": "Balanced"}                    # only benchmark 3 maps to a single profile
-    bm = m[m["risk_profile"] == ""].groupby("client_id")["benchmark_id"].agg(lambda s: set(s))
+    # benchmarks that belong to exactly ONE profile can be read back to that profile
+    owners = pd.Series(RISK_TO_BENCHMARK).groupby(lambda rp: RISK_TO_BENCHMARK[rp]).apply(lambda s: list(s.index))
+    inverse = {bm_id: rps[0] for bm_id, rps in owners.items() if len(rps) == 1}
+    print(f"  benchmarks that identify a single profile: {inverse}")
+    bm = m[is_blank(m["risk_profile"])].groupby("client_id")["benchmark_id"].agg(lambda s: set(s))
     single = bm[bm.map(len) == 1].map(lambda s: next(iter(s)))
     fillable = single[single.isin(inverse)].map(inverse)
     print(f"  blank clients with snapshots: {len(bm)}, all on one benchmark: {len(single)}, "
@@ -244,10 +282,11 @@ def d05_risk_profile(t):
     cl["risk_profile_imputed"] = 0
     n = record_changes("dim_client", cl, mask, "risk_profile", cl.loc[mask, "client_id"].map(fillable))
     cl.loc[mask, "risk_profile_imputed"] = 1
-    left = (cl["risk_profile"] == "").sum()
+    left = is_blank(cl["risk_profile"]).sum()
     print(f"  after : {n} filled with 'Balanced', still blank = {left}, flagged = {cl['risk_profile_imputed'].sum()}")
     assert n == blank.sum(), "not every blank profile could be verified - review before filling"
     assert left == 0 and cl["risk_profile_imputed"].sum() == n
+    expect("D05", n)
     log("dim_client", "D05", "risk_profile blank", "fill 'Balanced' + risk_profile_imputed=1", n,
         "all snapshots of these clients use benchmark 3, which only Balanced uses (rule holds 100%)")
 
@@ -258,6 +297,13 @@ def d02_orphan_transactions(t):
     valid = set(t["dim_client"]["client_id"])
     orphan = ~tx["client_id"].isin(valid)
     amt = num(tx.loc[orphan, "amount"]).sum()
+    # verify these are genuinely missing clients, not a format problem making valid ids look orphaned
+    oid = tx.loc[orphan, "client_id"]
+    assert oid.str.fullmatch(r"\d+").all(), "orphan client_id has a format problem (e.g. '45.0') - fix, don't quarantine"
+    assert (oid.astype(int) > max(int(c) for c in valid)).all(), "an orphan id falls inside the client id range"
+    assert tx.loc[orphan, "advisor_id"].isin(set(t["dim_advisor"]["advisor_id"])).all()
+    print(f"  verified: orphan ids are clean integers {oid.astype(int).min()}-{oid.astype(int).max()}, "
+          f"all above the highest client id, advisors valid")
     print(f"  before: {len(tx):,} rows, {orphan.sum()} orphan rows, "
           f"{tx.loc[orphan, 'client_id'].nunique()} distinct ids, amount ${amt:,.2f}")
     t["fact_transactions"] = quarantine("fact_transactions_orphan_client", "fact_transactions",
@@ -266,6 +312,7 @@ def d02_orphan_transactions(t):
     print(f"  after : {len(after):,} rows, orphan rows = {(~after['client_id'].isin(valid)).sum()}")
     assert after["client_id"].isin(valid).all()
     assert len(after) + orphan.sum() == len(tx)
+    expect("D02", int(orphan.sum()))
     log("fact_transactions", "D02", "client_id not in dim_client", "quarantine", orphan.sum(),
         f"{tx.loc[orphan, 'client_id'].nunique()} distinct ids, total amount ${amt:,.2f}")
 
@@ -286,11 +333,12 @@ def d07_negative_shares(t):
 
     n = record_changes("fact_transactions", tx, neg, "shares", tx.loc[neg, "shares"].str.lstrip("-"))
     sh2 = num(tx["shares"])
-    sec = tx["txn_type"].isin(["Buy", "Sell", "Dividend"])
+    sec = tx["txn_type"].isin(SECURITY_TXN_TYPES)
     recon = ((sh2 * num(tx["price"]) - num(tx["amount"])).abs() <= 0.05)[sec].mean()
     print(f"  after : {n} changed, negative remaining = {(sh2 < 0).sum()}, "
           f"shares x price = amount on {recon:.2%} of security rows")
     assert (sh2 < 0).sum() == 0 and recon == 1.0
+    expect("D07", n)
     log("fact_transactions", "D07", "negative shares on Buy", "convert: absolute value", n,
         "amount reconciles to |shares| x price for 100% of changed rows")
 
@@ -300,7 +348,8 @@ def d06_percent_returns(t):
     sn = t["fact_portfolio_snapshot"]
     pct = sn["return_ytd"].str.endswith("%")
     print(f"  before: {pct.sum()} percent-text values, e.g. {sn.loc[pct, 'return_ytd'].head(3).tolist()}")
-    new = sn.loc[pct, "return_ytd"].map(lambda v: str((Decimal(v.rstrip("%")) / 100).normalize()))
+    # format(..., "f") never produces scientific notation ('1000%' -> '10', not '1E+1')
+    new = sn.loc[pct, "return_ytd"].map(lambda v: format((Decimal(v.strip().rstrip("%")) / 100).normalize(), "f"))
     # reconcile against the alpha identity BEFORE writing
     check = (num(new) - num(sn.loc[pct, "benchmark_return_ytd"]) - num(sn.loc[pct, "active_alpha_ytd"])).abs()
     print(f"  reconcile: value/100 = benchmark + alpha (<=0.0001) for {(check <= 1e-4).sum()} / {pct.sum()}")
@@ -312,6 +361,7 @@ def d06_percent_returns(t):
     print(f"  after : {n} converted, non-numeric remaining = {r.isna().sum()}, "
           f"alpha identity holds on {alpha_ok:.2%} of rows")
     assert r.notna().all() and alpha_ok == 1.0
+    expect("D06", n)
     log("fact_portfolio_snapshot", "D06", "return_ytd stored as percent text", "convert: strip %, /100", n,
         "100% reconcile to benchmark_return_ytd + active_alpha_ytd")
 
@@ -332,6 +382,7 @@ def d08_aum_floor(t):
         print(f"  {name}: flagged {k}; minimum {col} = {num(df[col]).min()}")
         assert df[col].equals(before_vals), "flagging changed a value"
         assert k == (num(df[col]) == 1000).sum()
+        expect(f"D08 {name}", int(k))
         log(name, "D08", f"{col} sitting at 1,000.00 floor", "flag aum_floor_flag=1 (value kept)", k,
             "no other source for true AUM; fee and snapshot agree 100%")
     # a flagged fee should sit on a flagged snapshot
@@ -353,31 +404,54 @@ def d09_extreme_returns(t):
     print(f"  flagged {k:,} rows ({hi.sum()} high, {lo.sum()} low) across {clients} clients; "
           f"benchmark min {num(sn['benchmark_return_ytd']).min():.1%}")
     assert sn["return_ytd"].equals(before_vals)
+    expect("D09", int(k))
     log("fact_portfolio_snapshot", "D09", "implausible YTD return", "flag extreme_return_flag=1 (value kept)", k,
         f"{hi.sum()} > +100%, {lo.sum()} < -50%, {clients} clients; alpha identity still holds")
 
 
-def log_leave_as_is(t):
-    tx, sec = t["fact_transactions"], t["dim_security"]
-    cash = ~tx["txn_type"].isin(["Buy", "Sell", "Dividend"])
+def log_leave_as_is(raw):
+    """Record the leave-as-is decisions (L01-L12) with counts computed from the RAW tables,
+    so they match the decision log's evidence (review finding 02-#7)."""
+    tx, sec, cl = raw["fact_transactions"], raw["dim_security"], raw["dim_client"]
+    sn, fe, adv, dd = raw["fact_portfolio_snapshot"], raw["fact_fees"], raw["dim_advisor"], raw["dim_date"]
+    since = cl.set_index("client_id")["client_since"]
+    early_sn = int((sn["snapshot_date"] < sn["client_id"].map(since)).sum())
+    early_fe = int((fe["fee_date"] < fe["client_id"].map(since)).sum())
+    early_tx = int((tx["txn_date"] < tx["client_id"].map(since)).sum())
+    cash = ~tx["txn_type"].isin(SECURITY_TXN_TYPES)
     etf = sec["is_etf"] == "True"
+    d = pd.to_datetime(dd["date"])
+    hol = d.dt.strftime("%m-%d").isin(["01-01", "07-04", "12-25"]) & (d.dt.dayofweek < 5) & (dd["is_trading_day"] == "1")
+    names = adv["first_name"].duplicated(keep=False) | adv["last_name"].duplicated(keep=False)
+    unused_bm = int((~raw["dim_benchmark"]["benchmark_id"].isin(set(sn["benchmark_id"]))).sum())
+    no_fee = len(set(zip(sn["client_id"], sn["snapshot_date"])) - set(zip(fe["client_id"], fe["fee_date"])))
+    per_client = sn.groupby("client_id").size()
     items = [
-        ("fact_portfolio_snapshot", "L01", "snapshot/fee dated before client_since",
-         "first monthly row is stamped the 1st of the joining month; 0 transactions precede client_since", 0),
-        ("fact_transactions", "L02", "blank security_id/shares/price", f"structural on {cash.sum():,} cash-flow rows", cash.sum()),
-        ("dim_security", "L03", "blank expense_ratio_bps / sector",
-         f"{(~etf).sum()} non-ETFs have no expense ratio, {etf.sum()} ETFs have no single sector", 0),
-        ("dim_advisor", "L04", "certifications = 'None'", "real value (no certification), kept as text", 6),
-        ("dim_security", "L05", "duplicate security names", "different tickers/asset classes - distinct securities", 6),
-        ("dim_advisor", "L06", "shared first/last names", "different people", 4),
-        ("dim_client", "L07", "zip_code leading zeros", "kept as text", 0),
-        ("dim_date", "L08", "is_trading_day ignores market holidays", "needs external holiday calendar", 0),
-        ("dim_client", "L09", "inactive clients with history", "real history", 0),
-        ("dim_benchmark", "L10", "benchmarks unused by some facts", "dimension members may be unused", 0),
-        ("fact_fees", "L11", "snapshot months with no fee row", "cannot recompute a fee that was never charged", 0),
-        ("fact_portfolio_snapshot", "L12", "clients with < 60 snapshots", "joined after Jan-2020", 0),
+        ("fact_portfolio_snapshot", "L01", "snapshot dated before client_since", early_sn,
+         f"the snapshot for the joining month is stamped the 1st; {early_tx} transactions precede client_since"),
+        ("fact_fees", "L01", "fee dated before client_since", early_fe, "same month-grain effect as snapshots"),
+        ("fact_transactions", "L02", "blank security_id/shares/price", int(cash.sum()),
+         "structural: exactly the Deposit / Withdrawal / Advisory Fee rows (raw count)"),
+        ("dim_security", "L03", "blank expense_ratio_bps on non-ETFs", int((~etf & is_blank(sec["expense_ratio_bps"])).sum()),
+         "single stocks have no expense ratio"),
+        ("dim_security", "L03", "blank sector on ETFs", int((etf & is_blank(sec["sector"])).sum()),
+         "multi-sector funds have no single sector"),
+        ("dim_advisor", "L04", "certifications = 'None'", int((adv["certifications"] == "None").sum()),
+         "real value (no certification), kept as text"),
+        ("dim_security", "L05", "duplicate security names", int(sec["name"].duplicated(keep=False).sum()),
+         "different tickers/asset classes - distinct securities"),
+        ("dim_advisor", "L06", "shared first or last names", int(names.sum()), "different people"),
+        ("dim_client", "L07", "zip_code with leading zero", int(cl["zip_code"].str.startswith("0").sum()), "kept as text"),
+        ("dim_date", "L08", "is_trading_day ignores market holidays", len(dd),
+         f"whole column affected; {int(hol.sum())} fixed-date holidays marked trading; needs external calendar"),
+        ("dim_client", "L09", "inactive clients with history", int((cl["is_active"] == "False").sum()), "real history"),
+        ("dim_benchmark", "L10", "benchmarks unused by snapshots", unused_bm, "dimension members may be unused"),
+        ("fact_fees", "L11", "snapshot client-months with no fee row", no_fee,
+         "cannot recompute a fee that was never charged"),
+        ("fact_portfolio_snapshot", "L12", "clients with < 60 snapshots", int((per_client < 60).sum()),
+         "joined after Jan-2020"),
     ]
-    for table, did, issue, note, rows in items:
+    for table, did, issue, rows, note in items:
         log(table, did, issue, "leave as is", rows, note)
 
 
@@ -396,20 +470,59 @@ def final_checks(raw_counts, t):
         print(f"  {tb:<26}{raw:>10,}{clean:>10,}{qn:>13,}  {'yes' if ok else 'NO'}")
         assert ok, f"{tb}: raw != clean + quarantined"
 
+    tx = t["fact_transactions"]
+    cash = ~tx["txn_type"].isin(SECURITY_TXN_TYPES)
     for ft, fk, dt, dk in ID_RELATIONSHIPS + DATE_RELATIONSHIPS:
         v = t[ft][fk]
-        v = v[v != ""]
-        rate = v.isin(set(t[dt][dk])).mean()
-        print(f"  RI {ft}.{fk} -> {dt}.{dk}: {rate:.2%}")
+        blank = is_blank(v)
+        # a blank key is only legitimate for security_id on cash-flow rows (decision log L02)
+        allowed_blank = (cash & blank) if (ft, fk) == ("fact_transactions", "security_id") else pd.Series(False, index=v.index)
+        assert not (blank & ~allowed_blank).any(), f"{ft}.{fk}: {int((blank & ~allowed_blank).sum())} unexpected blank keys"
+        rate = v[~blank].isin(set(t[dt][dk])).mean()
+        print(f"  RI {ft}.{fk} -> {dt}.{dk}: {rate:.2%}  (blank keys: {int(blank.sum()):,}, all structural)")
         assert rate == 1.0
 
     for tb in TABLES:
         assert t[tb][PK[tb]].is_unique, f"{tb} PK not unique"
 
-    fe = t["fact_fees"]
+    fe, sn, cl = t["fact_fees"], t["fact_portfolio_snapshot"], t["dim_client"]
     fee_ok = ((num(fe["aum_basis"]) * num(fe["bps_charged"]) / 120000 - num(fe["amount"])).abs() <= 0.02).mean()
+    alpha_ok = ((num(sn["return_ytd"]) - num(sn["benchmark_return_ytd"]) - num(sn["active_alpha_ytd"])).abs() <= 1e-4).mean()
+    sec = tx["txn_type"].isin(SECURITY_TXN_TYPES)
+    trade_ok = ((num(tx["shares"]) * num(tx["price"]) - num(tx["amount"])).abs() <= 0.05)[sec].mean()
+    adv = cl.set_index("client_id")["advisor_id"]
+    adv_ok = {f: (t[f]["advisor_id"] == t[f]["client_id"].map(adv)).mean()
+              for f in ["fact_fees", "fact_portfolio_snapshot", "fact_transactions"]}
     print(f"  fee amount = aum_basis x bps / 10000 / 12: {fee_ok:.2%}")
-    assert fee_ok == 1.0
+    print(f"  active_alpha_ytd = return_ytd - benchmark_return_ytd: {alpha_ok:.2%}")
+    print(f"  amount = shares x price (security txns): {trade_ok:.2%}")
+    print(f"  fact advisor_id = dim_client.advisor_id: " + ", ".join(f"{k} {v:.2%}" for k, v in adv_ok.items()))
+    assert fee_ok == 1.0 and alpha_ok == 1.0 and trade_ok == 1.0 and all(v == 1.0 for v in adv_ok.values())
+
+    # expected row counts from the decision log
+    assert len(t["dim_client"]) == 2500 and len(tx) == 298572, "clean row counts differ from the decision log"
+    assert q_counts == {"dim_client": 25, "fact_transactions": 200}, f"quarantine counts differ: {q_counts}"
+
+
+def pre_write_checks(t, raw_cols, vc):
+    """Everything that must hold before a single file is written (review finding 02-#4)."""
+    header("PRE-WRITE CHECKS")
+    flag_cols = {"risk_profile_imputed", "aum_floor_flag", "extreme_return_flag"}
+    for tb in TABLES:
+        cols = list(t[tb].columns)
+        assert cols[:len(raw_cols[tb])] == raw_cols[tb], f"{tb}: original columns changed"
+        assert set(cols[len(raw_cols[tb]):]) <= flag_cols, f"{tb}: unexpected new column"
+        for fc in set(cols) & flag_cols:
+            assert t[tb][fc].isin([0, 1]).all(), f"{tb}.{fc} is not 0/1"
+    # value_changes must agree with cleaning_log step by step, not just in total
+    per_col = vc.groupby(["table", "column"]).size()
+    for row in CLEAN_LOG:
+        if row["decision_id"] in STEP_COLUMN:
+            key = STEP_COLUMN[row["decision_id"]]
+            got = int(per_col.get(key, 0))
+            print(f"  {row['decision_id']}: cleaning_log {row['rows_affected']:,} = value_changes {got:,}")
+            assert got == row["rows_affected"], f"{row['decision_id']}: log and value_changes disagree"
+    assert set(per_col.index) == set(STEP_COLUMN.values()), "value_changes has cells from an unlogged step"
 
 
 # --------------------------------------------------------------------------
@@ -512,8 +625,7 @@ def main():
     ap.add_argument("--data", default=None)
     args = ap.parse_args()
     data_dir = locate_data(args.data)
-    os.makedirs(CLEAN_DIR, exist_ok=True)
-    os.makedirs(AUDIT_DIR, exist_ok=True)
+    CLEAN_LOG.clear(); VALUE_CHANGES.clear(); QUARANTINE.clear()   # safe if main() runs twice
 
     print(f"Reading raw files (as text) from: {data_dir}")
     t, raw_counts, raw_cols = {}, {}, {}
@@ -525,6 +637,8 @@ def main():
         raw_counts[tb], raw_cols[tb] = len(t[tb]), list(t[tb].columns)
         print(f"  {tb:<26}{len(t[tb]):>9,} rows  <- {os.path.basename(path)}")
 
+    raw = {tb: df.copy() for tb, df in t.items()}     # untouched copy for leave-as-is counts
+
     d01_security_id(t)
     d03_duplicate_clients(t)
     d04_state(t)
@@ -534,27 +648,24 @@ def main():
     d06_percent_returns(t)
     d08_aum_floor(t)
     d09_extreme_returns(t)
-    log_leave_as_is(t)
+    log_leave_as_is(raw)
     final_checks(raw_counts, t)
-
-    header("WRITING OUTPUTS")
-    flag_cols = {"risk_profile_imputed", "aum_floor_flag", "extreme_return_flag"}
-    for tb in TABLES:
-        cols = list(t[tb].columns)
-        assert cols[:len(raw_cols[tb])] == raw_cols[tb], f"{tb}: original columns changed"
-        assert set(cols[len(raw_cols[tb]):]) <= flag_cols, f"{tb}: unexpected new column"
-        t[tb].to_csv(os.path.join(CLEAN_DIR, f"{tb}.csv"), index=False)
-        print(f"  data/clean/{tb}.csv  ({len(t[tb]):,} rows, added: {cols[len(raw_cols[tb]):] or 'none'})")
-
-    pd.DataFrame(CLEAN_LOG).to_csv(os.path.join(AUDIT_DIR, "cleaning_log.csv"), index=False)
     vc = pd.concat(VALUE_CHANGES, ignore_index=True)
+    pre_write_checks(t, raw_cols, vc)
+
+    # only now - with every assertion passed - is anything written
+    header("WRITING OUTPUTS")
+    os.makedirs(CLEAN_DIR, exist_ok=True)
+    os.makedirs(AUDIT_DIR, exist_ok=True)
+    for tb in TABLES:
+        t[tb].to_csv(os.path.join(CLEAN_DIR, f"{tb}.csv"), index=False)
+        added = list(t[tb].columns)[len(raw_cols[tb]):]
+        print(f"  data/clean/{tb}.csv  ({len(t[tb]):,} rows, added: {added or 'none'})")
+    pd.DataFrame(CLEAN_LOG).to_csv(os.path.join(AUDIT_DIR, "cleaning_log.csv"), index=False)
     vc.to_csv(os.path.join(AUDIT_DIR, "value_changes.csv"), index=False)
     for name, (_, q) in QUARANTINE.items():
         q.to_csv(os.path.join(AUDIT_DIR, f"quarantine_{name}.csv"), index=False)
     write_readme(t, raw_counts)
-
-    logged = sum(r["rows_affected"] for r in CLEAN_LOG if r["action"].startswith(("convert", "standardize", "fill")))
-    assert logged == len(vc), f"cleaning_log ({logged}) and value_changes ({len(vc)}) disagree"
     print(f"  data/audit/cleaning_log.csv ({len(CLEAN_LOG)} entries)")
     print(f"  data/audit/value_changes.csv ({len(vc):,} changed cells)")
     for name, (_, q) in QUARANTINE.items():

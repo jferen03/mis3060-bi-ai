@@ -11,6 +11,9 @@ Contents
   4. IQR outlier flags on numeric columns with no natural upper bound
   5. Scorecard: one row per table per stage (raw / clean)
        % completeness, % key uniqueness, % type validity, % rule pass, % referential match
+       (+ % reconciliation pass)
+  6. Gate: every assertion on the clean stage runs BEFORE any report is written, so a failing
+     run never overwrites the scorecard the committee report is built from.
 
 Every check runs on BOTH the raw files and data/clean/.
 Outputs
@@ -25,6 +28,7 @@ Optional: python scripts/03_validate.py --raw "path/to/raw/folder"
 import argparse
 import glob
 import os
+import re
 import sys
 
 import pandas as pd
@@ -95,12 +99,26 @@ NATURAL_KEYS = {
     "dim_security": ["ticker"],
     "fact_fees": ["client_id", "fee_date", "fee_type"],
     "fact_portfolio_snapshot": ["client_id", "snapshot_date"],
+    # no business id on transactions: the same trade entered twice would repeat every column but txn_id
+    "fact_transactions": ["client_id", "advisor_id", "security_id", "txn_date", "txn_type", "shares", "price", "amount"],
 }
+SECURITY_TXN_TYPES = ["Buy", "Sell", "Dividend"]
+RISK_TO_BENCHMARK = {"Aggressive": "1", "Moderately Aggressive": "1", "Balanced": "3",
+                     "Conservative": "8", "Moderately Conservative": "8"}
+EXTREME_HIGH, EXTREME_LOW = 1.0, -0.5      # same thresholds as 02_clean.py (decision D09)
+# Tolerance for the alpha identity: 1e-4, not the profiler's 2e-6, because the 300 returns converted
+# from '9.28%' text only carry 4 decimals; every other identity uses the money precision of its columns.
+TOL_RETURN = 1e-4
+# rules that test a documented known limitation (decision log L08): they count in the scorecard
+# so the limitation is visible, but they are expected to fail in BOTH stages and do not stop the run
+KNOWN_LIMITATION_RULES = {"fixed-date market holiday is not a trading day"}
 FLAG_COLUMNS = {"risk_profile_imputed", "aum_floor_flag", "extreme_return_flag"}
 US_STATES = set("AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE "
                 "NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY".split())
 
 DETAILS = []
+FAIL_ROWS = {}        # (stage, table) -> boolean Series: row fails at least one rule or reconciliation
+ORPHANS = {}          # (stage, relationship) -> orphan row count (unrounded)
 
 
 # ==========================================================================
@@ -120,6 +138,7 @@ def check_referential_integrity(fact_df, fact_key, dim_df, dim_key):
         orphan_rows          number of fact rows whose non-null key is not in the dimension
         distinct_orphan_keys number of different orphan key values
         null_key_rate        share of fact rows with a null key (0-1)
+        non_null_keys        number of fact rows with a non-null key (denominator of match_rate)
         orphan_keys          sorted list of up to 20 example orphan keys
         orphan_df            the orphan rows themselves (DataFrame)
     """
@@ -138,6 +157,7 @@ def check_referential_integrity(fact_df, fact_key, dim_df, dim_key):
         "orphan_rows": int(orphan.sum()),
         "distinct_orphan_keys": len(orphan_keys),
         "null_key_rate": float(null.mean()) if len(fk) else 0.0,
+        "non_null_keys": non_null,
         "orphan_keys": orphan_keys[:20],
         "orphan_df": fact_df.loc[orphan],
     }
@@ -167,6 +187,13 @@ def parses(s, typ):
     return pd.Series(True, index=s.index)
 
 
+def mark_fail(stage, table, df, fail_mask):
+    """Remember which rows failed a rule/reconciliation (used to test whether IQR flags = errors)."""
+    key = (stage, table)
+    cur = FAIL_ROWS.get(key, pd.Series(False, index=df.index))
+    FAIL_ROWS[key] = cur | fail_mask.reindex(df.index, fill_value=False)
+
+
 def detail(stage, kind, table, check, passed, total, note=""):
     DETAILS.append({"stage": stage, "check_type": kind, "table": table, "check": check,
                     "rows_checked": int(total), "rows_passed": int(passed),
@@ -178,7 +205,8 @@ def find_file(folder, table):
     exact = os.path.join(folder, table + ".csv")
     if os.path.exists(exact):
         return exact
-    hits = sorted(glob.glob(os.path.join(folder, glob.escape(table) + " (*).csv")))
+    hits = glob.glob(os.path.join(folder, glob.escape(table) + " (*).csv"))
+    hits = sorted(hits, key=lambda h: int(re.search(r"\((\d+)\)\.csv$", h).group(1)))   # (10) after (9)
     return hits[-1] if hits else None
 
 
@@ -217,11 +245,12 @@ def nonblank(col):
 
 
 def is_sec_txn(df):
-    return df["txn_type"].isin(["Buy", "Sell", "Dividend"])
+    return df["txn_type"].isin(SECURITY_TXN_TYPES)
 
 
 RULES = [
     # dim_advisor
+    # same bound as 01_profile.py
     ("dim_advisor", "years_experience in [0, 60]", nonblank("years_experience"), between("years_experience", 0, 60)),
     ("dim_advisor", "aum_target_mm > 0", nonblank("aum_target_mm"), between("aum_target_mm", 0, strict_lo=True)),
     ("dim_advisor", "region in allowed list", None,
@@ -251,6 +280,10 @@ RULES = [
     ("dim_date", "week_of_year in [1, 53]", None, between("week_of_year", 1, 53)),
     ("dim_date", "is_* flags are 0/1", None,
      lambda df, t: df[["is_month_end", "is_quarter_end", "is_year_end", "is_trading_day"]].isin(["0", "1"]).all(axis=1)),
+    ("dim_date", "fixed-date market holiday is not a trading day",
+     lambda df: pd.to_datetime(df["date"]).dt.strftime("%m-%d").isin(["01-01", "07-04", "12-25"])
+     & (pd.to_datetime(df["date"]).dt.dayofweek < 5),
+     lambda df, t: df["is_trading_day"] == "0"),
     ("dim_date", "weekend is never a trading day", None,
      lambda df, t: ~(df["day_of_week"].isin(["Saturday", "Sunday"]) & (df["is_trading_day"] == "1"))),
     # dim_security
@@ -288,79 +321,122 @@ RULES = [
 ]
 
 
+# Rules on the flag columns added by 02_clean.py: they only exist in the clean stage.
+# Each flag must be 0/1 AND must equal the condition the decision log defines for it.
+def _flag_matches(col, condition):
+    return lambda df, t: df[col].isin(["0", "1"]) & ((df[col] == "1") == condition(df))
+
+
+FLAG_RULES = [
+    ("dim_client", "risk_profile_imputed", "risk_profile_imputed is 0/1 and = 1 only on Balanced (D05)",
+     lambda df, t: df["risk_profile_imputed"].isin(["0", "1"])
+     & ((df["risk_profile_imputed"] == "0") | (df["risk_profile"] == "Balanced"))),
+    ("fact_portfolio_snapshot", "aum_floor_flag", "aum_floor_flag = (aum == 1,000.00) (D08)",
+     _flag_matches("aum_floor_flag", lambda df: num(df["aum"]) == 1000)),
+    ("fact_fees", "aum_floor_flag", "aum_floor_flag = (aum_basis == 1,000.00) (D08)",
+     _flag_matches("aum_floor_flag", lambda df: num(df["aum_basis"]) == 1000)),
+    ("fact_portfolio_snapshot", "extreme_return_flag", "extreme_return_flag = return_ytd > +100% or < -50% (D09)",
+     _flag_matches("extreme_return_flag",
+                   lambda df: (num(df["return_ytd"]) > EXTREME_HIGH) | (num(df["return_ytd"]) < EXTREME_LOW))),
+]
+
+
 def run_rules(stage, t):
-    """Returns {table: (passed, checked)} pooled over that table's rules."""
-    pooled = {}
-    for table, name, applies, rule in RULES:
+    """Returns ({table: (passed, checked)}, {table: rules_run}) pooled over that table's rules."""
+    pooled, n_rules = {}, {}
+    all_rules = [(tb, name, applies, rule) for tb, name, applies, rule in RULES]
+    all_rules += [(tb, name, None, rule) for tb, col, name, rule in FLAG_RULES if col in t[tb].columns]
+    for table, name, applies, rule in all_rules:
         df = t[table]
         scope = applies(df) if applies else pd.Series(True, index=df.index)
         ok = rule(df, t).fillna(False).astype(bool)
         passed, checked = int((ok & scope).sum()), int(scope.sum())
-        detail(stage, "rule", table, name, passed, checked)
+        note = "known limitation (decision log L08) - expected to fail in both stages" if name in KNOWN_LIMITATION_RULES else ""
+        detail(stage, "rule", table, name, passed, checked, note)
+        if name not in KNOWN_LIMITATION_RULES:
+            mark_fail(stage, table, df, scope & ~ok)
         p, c = pooled.get(table, (0, 0))
         pooled[table] = (p + passed, c + checked)
-    return pooled
+        n_rules[table] = n_rules.get(table, 0) + 1
+    return pooled, n_rules
 
 
 # ==========================================================================
 # 3. Cross-table reconciliations
 # ==========================================================================
+def recon(stage, table, df, check, ok, scope=None, note=""):
+    """Record one reconciliation: ok/scope are row masks on df."""
+    scope = pd.Series(True, index=df.index) if scope is None else scope
+    ok = ok.reindex(df.index, fill_value=False).fillna(False).astype(bool)
+    detail(stage, "reconciliation", table, check, int((ok & scope).sum()), int(scope.sum()), note)
+    mark_fail(stage, table, df, scope & ~ok)
+
+
 def reconciliations(stage, t):
     fe, sn, tx, cl = t["fact_fees"], t["fact_portfolio_snapshot"], t["fact_transactions"], t["dim_client"]
+    imputed = cl.get("risk_profile_imputed", pd.Series("0", index=cl.index)) == "1"
 
     # R1 recomputed fee amount vs stored amount
     calc = num(fe["aum_basis"]) * num(fe["bps_charged"]) / 10000 / 12
-    ok = (calc - num(fe["amount"])).abs() <= 0.02
-    detail(stage, "reconciliation", "fact_fees", "R1 amount = aum_basis x bps / 10000 / 12", ok.sum(), len(fe))
+    recon(stage, "fact_fees", fe, "R1 amount = aum_basis x bps / 10000 / 12", (calc - num(fe["amount"])).abs() <= 0.02)
 
     # R2 fee aum_basis vs snapshot aum, same client-month (two tables describe the same fact)
-    j = fe.merge(sn[["client_id", "snapshot_date", "aum"]], left_on=["client_id", "fee_date"],
-                 right_on=["client_id", "snapshot_date"], how="left")
-    ok = (num(j["aum_basis"]) - num(j["aum"])).abs() <= 0.01
-    detail(stage, "reconciliation", "fact_fees", "R2 aum_basis = fact_portfolio_snapshot.aum (same client-month)",
-           ok.sum(), len(j), f"{j['aum'].isna().sum()} fees without a matching snapshot")
+    snap = sn[["client_id", "snapshot_date", "aum"]]
+    assert not snap.duplicated(["client_id", "snapshot_date"]).any(), "snapshot grain not unique - R2 would fan out"
+    j = fe[["client_id", "fee_date", "aum_basis"]].reset_index().merge(
+        snap, left_on=["client_id", "fee_date"], right_on=["client_id", "snapshot_date"], how="left").set_index("index")
+    assert len(j) == len(fe)
+    recon(stage, "fact_fees", fe, "R2 aum_basis = fact_portfolio_snapshot.aum (same client-month)",
+          (num(j["aum_basis"]) - num(j["aum"])).abs() <= 0.01, note=f"{j['aum'].isna().sum()} fees without a matching snapshot")
 
     # R3 transaction amount vs shares x price
-    sec = tx["txn_type"].isin(["Buy", "Sell", "Dividend"])
-    ok = (num(tx["shares"]) * num(tx["price"]) - num(tx["amount"])).abs() <= 0.05
-    detail(stage, "reconciliation", "fact_transactions", "R3 amount = shares x price (security txns)",
-           (ok & sec).sum(), sec.sum())
+    sec = tx["txn_type"].isin(SECURITY_TXN_TYPES)
+    recon(stage, "fact_transactions", tx, "R3 amount = shares x price (security txns)",
+          (num(tx["shares"]) * num(tx["price"]) - num(tx["amount"])).abs() <= 0.05, sec)
 
     # R4 alpha identity within the snapshot
-    ok = (num(sn["return_ytd"]) - num(sn["benchmark_return_ytd"]) - num(sn["active_alpha_ytd"])).abs() <= 1e-4
-    detail(stage, "reconciliation", "fact_portfolio_snapshot",
-           "R4 active_alpha_ytd = return_ytd - benchmark_return_ytd", ok.sum(), len(sn))
+    recon(stage, "fact_portfolio_snapshot", sn, "R4 active_alpha_ytd = return_ytd - benchmark_return_ytd",
+          (num(sn["return_ytd"]) - num(sn["benchmark_return_ytd"]) - num(sn["active_alpha_ytd"])).abs() <= TOL_RETURN)
 
     # R5 advisor on every fact = advisor on dim_client
     adv = cl.set_index("client_id")["advisor_id"]
     for name, df in [("fact_fees", fe), ("fact_portfolio_snapshot", sn), ("fact_transactions", tx)]:
         exp = df["client_id"].map(adv)
         has = exp.notna()
-        detail(stage, "reconciliation", name, "R5 advisor_id = dim_client.advisor_id",
-               (df["advisor_id"] == exp)[has].sum(), has.sum(), f"{(~has).sum()} rows with no client to compare")
+        recon(stage, name, df, "R5 advisor_id = dim_client.advisor_id", df["advisor_id"] == exp, has,
+              f"{(~has).sum()} rows with no client to compare")
 
-    # R6 snapshot benchmark follows the client's risk profile
-    rule = {"Aggressive": "1", "Moderately Aggressive": "1", "Balanced": "3",
-            "Conservative": "8", "Moderately Conservative": "8"}
-    exp = sn["client_id"].map(cl.set_index("client_id")["risk_profile"].map(rule))
+    # R6 snapshot benchmark follows the client's risk profile. Clients whose profile was IMPUTED from this
+    # same rule (D05) are excluded - including them would test the rule against itself.
+    real_profile = cl["risk_profile"].where(~imputed)
+    exp = sn["client_id"].map(cl.set_index("client_id")["risk_profile"].where(~imputed.values).map(RISK_TO_BENCHMARK))
     has = exp.notna()
-    detail(stage, "reconciliation", "fact_portfolio_snapshot", "R6 benchmark_id follows dim_client.risk_profile",
-           (sn["benchmark_id"] == exp)[has].sum(), has.sum(),
-           f"{(~has).sum()} snapshot rows whose client has no usable risk_profile")
+    n_imp = int(sn["client_id"].isin(set(cl.loc[imputed, "client_id"])).sum())
+    recon(stage, "fact_portfolio_snapshot", sn, "R6 benchmark_id follows dim_client.risk_profile",
+          sn["benchmark_id"] == exp, has,
+          f"{(~has).sum()} snapshot rows not tested: no usable profile"
+          + (f" (incl. {n_imp} rows of {int(imputed.sum())} clients whose profile was imputed by this rule)" if n_imp else ""))
 
     # R7 snapshot account_type = client primary_account_type
     exp = sn["client_id"].map(cl.set_index("client_id")["primary_account_type"])
-    has = exp.notna()
-    detail(stage, "reconciliation", "fact_portfolio_snapshot", "R7 account_type = dim_client.primary_account_type",
-           (sn["account_type"] == exp)[has].sum(), has.sum())
+    recon(stage, "fact_portfolio_snapshot", sn, "R7 account_type = dim_client.primary_account_type",
+          sn["account_type"] == exp, exp.notna())
 
-    # R8 first monthly snapshot = month the client joined (or Jan-2020) - checked at month grain (log L01)
+    # R8-R10: decision log L01 - monthly rows start in the joining MONTH; daily transactions never precede it
+    since = cl.set_index("client_id")["client_since"]
+    since = since[~blank(since)]
+    month_start = since.str[:7] + "-01"
     first = sn.groupby("client_id")["snapshot_date"].min()
-    since = cl.set_index("client_id")["client_since"].reindex(first.index)
-    exp = (since.str[:7] + "-01").where(since >= "2020-01-01", "2020-01-01")
-    has = since.notna()
-    detail(stage, "reconciliation", "dim_client", "R8 first snapshot month = client_since month",
-           (first == exp)[has].sum(), has.sum())
+    exp_first = month_start.where(since >= "2020-01-01", "2020-01-01").reindex(first.index)
+    cl_first = cl["client_id"].map(first)
+    cl_exp = cl["client_id"].map(exp_first)
+    recon(stage, "dim_client", cl, "R8 first snapshot month = client_since month (or Jan-2020)",
+          cl_first == cl_exp, cl_exp.notna() & cl_first.notna())
+    fe_ms = fe["client_id"].map(month_start)
+    recon(stage, "fact_fees", fe, "R9 no fee before the client_since month", fe["fee_date"] >= fe_ms, fe_ms.notna())
+    tx_since = tx["client_id"].map(since)
+    recon(stage, "fact_transactions", tx, "R10 no transaction before client_since", tx["txn_date"] >= tx_since,
+          tx_since.notna())
 
 
 # ==========================================================================
@@ -368,27 +444,39 @@ def reconciliations(stage, t):
 # ==========================================================================
 IQR_COLUMNS = [("fact_transactions", "amount"), ("fact_fees", "amount"),
                ("fact_portfolio_snapshot", "aum"), ("dim_client", "initial_aum")]
-IQR_SENTENCE = ("Flagged does not mean wrong: these columns are right-skewed by design (UHNW clients hold "
-                "far more than Retail clients), so an IQR fence marks the large-but-real accounts as outliers; "
-                "a flag is a prompt to look, and a value is only wrong if it fails a rule or a reconciliation.")
+IQR_RESULTS = []      # (stage, table, col, flagged, flagged_and_failing, unparseable)
 
 
 def iqr_flags(stage, t):
-    out = {}
     for table, col in IQR_COLUMNS:
         x = num(t[table][col])
+        unparseable = int(x.isna().sum())
         q1, q3 = x.quantile(0.25), x.quantile(0.75)
         lo, hi = q1 - 1.5 * (q3 - q1), q3 + 1.5 * (q3 - q1)
-        flag = ((x < lo) | (x > hi)).astype(int)
-        out[(table, col)] = flag
-        # how many flagged rows ALSO fail a rule or reconciliation? (evidence flagged != wrong)
-        note = f"Q1={q1:,.2f} Q3={q3:,.2f} fence=[{lo:,.2f}, {hi:,.2f}]"
+        flag = (x < lo) | (x > hi)
+        # evidence for "flagged != wrong": how many flagged rows ALSO fail a rule or reconciliation?
+        fails = FAIL_ROWS.get((stage, table), pd.Series(False, index=flag.index))
+        both = int((flag & fails).sum())
+        note = (f"Q1={q1:,.2f} Q3={q3:,.2f} fence=[{lo:,.2f}, {hi:,.2f}]; {int(flag.sum()):,} rows flagged "
+                f"({flag.mean():.1%}); {both:,} of them also fail a rule or reconciliation")
+        if unparseable:
+            note += f"; {unparseable} values not numeric (not tested - see type validity)"
         if table == "dim_client":
-            tiers = t[table].loc[flag == 1, "client_tier"].value_counts().to_dict()
-            note += f"; flagged by tier {tiers}"
-        detail(stage, "iqr_outlier", table, f"IQR 1.5x fence on {col}", int((flag == 0).sum()), len(flag),
-               note + f"; {flag.sum():,} rows flagged ({flag.mean():.1%})")
-    return out
+            note += f"; flagged by tier {t[table].loc[flag, 'client_tier'].value_counts().to_dict()}"
+        detail(stage, "iqr_outlier", table, f"IQR 1.5x fence on {col}", int((~flag).sum()), len(flag), note)
+        IQR_RESULTS.append((stage, table, col, int(flag.sum()), both, unparseable))
+
+
+def iqr_sentence():
+    clean = [r for r in IQR_RESULTS if r[0] == "clean"]
+    flagged = sum(r[3] for r in clean)
+    both = sum(r[4] for r in clean)
+    if both == 0:
+        return (f"Flagged does not mean wrong: in the clean data none of the {flagged:,} IQR-flagged values fails "
+                f"any rule or reconciliation - these columns are right-skewed by design (large UHNW accounts), "
+                f"so the fence marks large-but-valid values, and a flag is only a prompt to look.")
+    return (f"Flagged does not by itself mean wrong: {both:,} of {flagged:,} IQR-flagged values in the clean data "
+            f"also fail a rule or reconciliation and should be investigated; the rest are large-but-valid values.")
 
 
 # ==========================================================================
@@ -443,7 +531,8 @@ def run_stage(stage, t):
     print(f"  {'relationship':<64}{'match':>8}{'orphans':>9}{'keys':>6}{'null':>7}")
     for ft, fk, dt, dk in RELATIONSHIPS:
         r = check_referential_integrity(t[ft], fk, t[dt], dk)
-        nn = round(len(t[ft]) * (1 - r["null_key_rate"]))
+        nn = r["non_null_keys"]
+        ORPHANS[(stage, f"{ft}.{fk} -> {dt}.{dk}")] = r["orphan_rows"]
         detail(stage, "referential_integrity", ft, f"{ft}.{fk} -> {dt}.{dk}", nn - r["orphan_rows"], nn,
                f"distinct orphan keys {r['distinct_orphan_keys']}; null-key rate {r['null_key_rate']:.2%}; "
                f"examples {r['orphan_keys'][:5]}")
@@ -452,9 +541,11 @@ def run_stage(stage, t):
         p, c = ri_pool.get(ft, (0, 0))
         ri_pool[ft] = (p + nn - r["orphan_rows"], c + nn)
 
-    rule_pool = run_rules(stage, t)
+    rule_pool, n_rules = run_rules(stage, t)
     reconciliations(stage, t)
     iqr_flags(stage, t)
+    rec = pd.DataFrame([d for d in DETAILS if d["stage"] == stage and d["check_type"] == "reconciliation"])
+    rec_pool = rec.groupby("table")[["rows_passed", "rows_checked"]].sum()
 
     rows = []
     for tb in TABLES:
@@ -466,9 +557,13 @@ def run_stage(stage, t):
             "pct_completeness": round(completeness(tb, df) * 100, 3),
             "pct_key_uniqueness": round(key_uniqueness(tb, df) * 100, 3),
             "pct_type_validity": round(type_validity(tb, df) * 100, 3),
-            "pct_rule_pass": round(rp / rc * 100, 3) if rc else "",
-            "pct_referential_match": round(rip / ric * 100, 3) if ric else "n/a (no foreign keys)",
-            "rules_checked": len([r for r in RULES if r[0] == tb]),
+            "pct_rule_pass": round(rp / rc * 100, 3) if rc else None,
+            # blank (not text) when a table has no foreign keys, so the column loads as a number in Power BI
+            "pct_referential_match": round(rip / ric * 100, 3) if ric else None,
+            "pct_reconciliation_pass": (round(rec_pool.loc[tb, "rows_passed"] / rec_pool.loc[tb, "rows_checked"] * 100, 3)
+                                        if tb in rec_pool.index and rec_pool.loc[tb, "rows_checked"] else None),
+            "rules_checked": n_rules.get(tb, 0),
+            "reconciliations_checked": int((rec["table"] == tb).sum()),
             "relationships_checked": len([r for r in RELATIONSHIPS if r[0] == tb]),
         })
     return rows
@@ -486,19 +581,17 @@ def main():
                 break
     if raw_dir is None or not os.path.isdir(CLEAN_DIR):
         sys.exit("Need the raw folder (--raw) and data/clean/ (run 02_clean.py first)")
-    os.makedirs(REPORT_DIR, exist_ok=True)
 
+    DETAILS.clear(); FAIL_ROWS.clear(); ORPHANS.clear(); IQR_RESULTS.clear()   # safe if main() runs twice
     scorecard = run_stage("raw", load(raw_dir)) + run_stage("clean", load(CLEAN_DIR))
     sc = pd.DataFrame(scorecard).sort_values(["table", "stage"], key=lambda c: c.map(
         {"raw": 0, "clean": 1}) if c.name == "stage" else c).reset_index(drop=True)
-    sc.to_csv(os.path.join(REPORT_DIR, "data_quality_scorecard.csv"), index=False)
     det = pd.DataFrame(DETAILS)
-    det.to_csv(os.path.join(REPORT_DIR, "validation_details.csv"), index=False)
 
     print(f"\n{'=' * 78}\nSCORECARD (reports/data_quality_scorecard.csv)\n{'=' * 78}")
     show = sc[["table", "stage", "rows", "pct_completeness", "pct_key_uniqueness", "pct_type_validity",
-               "pct_rule_pass", "pct_referential_match"]]
-    print(show.to_string(index=False))
+               "pct_rule_pass", "pct_referential_match", "pct_reconciliation_pass"]]
+    print(show.to_string(index=False, na_rep="n/a"))
 
     print("\nFailing checks, raw -> clean:")
     piv = det.pivot_table(index=["check_type", "table", "check"], columns="stage", values="rows_failed",
@@ -507,17 +600,38 @@ def main():
     piv = piv[[c for c in ["raw", "clean"] if c in piv.columns]]
     print(piv.drop(index="iqr_outlier", errors="ignore").to_string())
 
-    print("\nIQR outlier flags (rows flagged, raw -> clean):")
-    for _, r in det[(det.check_type == "iqr_outlier")].iterrows():
-        print(f"  [{r.stage:<5}] {r.table}.{r.check.split(' on ')[-1]}: {r.rows_failed:,} flagged  ({r.note.split('; ')[1] if 'tier' in r.note else r.note.split('; ')[0]})")
-    print("\n" + IQR_SENTENCE)
+    print("\nIQR outlier flags (raw -> clean):")
+    for stage, table, col, flagged, both, unp in IQR_RESULTS:
+        print(f"  [{stage:<5}] {table}.{col}: {flagged:,} flagged, {both:,} of them also fail a rule/reconciliation")
+    print("\n" + iqr_sentence())
 
-    # the clean stage must be at least as good as raw on every metric, and RI must be perfect
-    clean = sc[sc.stage == "clean"].set_index("table")
-    for tb, r in clean.iterrows():
-        if isinstance(r.pct_referential_match, float):
-            assert r.pct_referential_match == 100.0, f"{tb}: clean RI below 100%"
-        assert r.pct_key_uniqueness == 100.0, f"{tb}: clean PK not unique"
+    # ---- GATE: everything below must hold before any report is written ----
+    print(f"\n{'=' * 78}\nGATE CHECKS (clean stage)\n{'=' * 78}")
+    for (stage, rel), n in ORPHANS.items():
+        if stage == "clean":
+            assert n == 0, f"clean RI: {rel} has {n} orphan rows"
+    cd = det[det["stage"] == "clean"]
+    bad = cd[cd["check_type"].isin(["rule", "reconciliation"]) & (cd["rows_failed"] > 0)
+             & ~cd["check"].isin(KNOWN_LIMITATION_RULES)]
+    assert bad.empty, "clean stage fails:\n" + bad[["table", "check", "rows_failed"]].to_string()
+    known = det[det["check"].isin(KNOWN_LIMITATION_RULES)].pivot_table(index="check", columns="stage", values="rows_failed")
+    assert (known["raw"] == known["clean"]).all(), "a known-limitation check changed between stages"
+    metrics = ["pct_completeness", "pct_key_uniqueness", "pct_type_validity", "pct_rule_pass",
+               "pct_referential_match", "pct_reconciliation_pass"]
+    raw_sc, clean_sc = sc[sc.stage == "raw"].set_index("table"), sc[sc.stage == "clean"].set_index("table")
+    for tb in TABLES:
+        for m in metrics:
+            r, c = raw_sc.loc[tb, m], clean_sc.loc[tb, m]
+            if pd.notna(r) and pd.notna(c):
+                assert c >= r, f"{tb}.{m}: clean {c} is worse than raw {r}"
+        for m in ["pct_completeness", "pct_key_uniqueness", "pct_type_validity"]:
+            assert clean_sc.loc[tb, m] == 100.0, f"{tb}: clean {m} = {clean_sc.loc[tb, m]}"
+    print("  clean: 0 orphans on all 13 relationships; 0 failing rules (except the documented L08 limitation)"
+          " and reconciliations; clean >= raw on every metric")
+
+    os.makedirs(REPORT_DIR, exist_ok=True)
+    sc.to_csv(os.path.join(REPORT_DIR, "data_quality_scorecard.csv"), index=False)
+    det.to_csv(os.path.join(REPORT_DIR, "validation_details.csv"), index=False)
     print("\nSaved reports/data_quality_scorecard.csv and reports/validation_details.csv")
 
 

@@ -9,7 +9,7 @@ We audited all eight tables in the extract (five dimensions, three facts; 555,40
 - **25 clients were in the client list twice**, inflating the client count from 2,500 to 2,525.
 - **200 transactions ($10.89M) belong to client IDs that do not exist.** These were set aside, not deleted.
 
-After cleaning, every one of the 13 table relationships matches 100%, and every business rule and reconciliation we tested passes on the clean data. Four flag columns were added so analysts can exclude suspicious AUM and return figures that we could not correct without inventing data.
+After cleaning, every one of the 13 table relationships matches 100%, and every business rule and reconciliation we tested passes on the clean data, except one documented limitation: 9 market holidays in the calendar are marked as trading days (Limitation 4). Four flag columns were added so analysts can exclude suspicious AUM and return figures that we could not correct without inventing data.
 
 ## Cleaning summary
 
@@ -27,7 +27,7 @@ After cleaning, every one of the 13 table relationships matches 100%, and every 
 
 Twelve further items looked odd but are legitimate and were left unchanged (e.g., blank security fields on deposits and withdrawals, the advisor certification value `None`, and the ZIP codes with leading zeros). Every changed cell (198,462) is logged in `data/audit/value_changes.csv`.
 
-**Scorecard: the three tables that changed** (the other five scored 100% on every measure before and after)
+**Scorecard: the three tables that changed.** Cleaning did not change the other five. Four of them score 100% on every measure; the calendar scores 99.90% on rules in both stages because of the holiday limitation (Limitation 4).
 
 | Table | Measure | Raw | Clean |
 |---|---|---:|---:|
@@ -58,7 +58,7 @@ For every table, raw rows = clean rows + quarantined rows.
 1. **$10.89M of transactions (200 rows, 0.07% of transaction value) are excluded** because their clients are missing from the client list. If those clients exist, firm-level activity is understated by that amount.
 2. **Imputed risk profiles** (75 clients) rely on the benchmark rule described above.
 3. **AUM and return outliers are flagged, not corrected.** Reports should exclude `extreme_return_flag = 1` from averages or use medians.
-4. **The calendar marks every weekday as a trading day**, including market holidays (e.g., 1 January 2020). Fixing it needs an exchange holiday calendar, which is outside the data provided.
+4. **The calendar marks every weekday as a trading day**, including market holidays: all 9 New Year's Days, Independence Days and Christmases that fall on a weekday in 2020–2024 (e.g., 1 January 2020) are flagged as trading days. Fixing it needs an exchange holiday calendar, which is outside the data provided.
 5. **7,350 client-months have a portfolio snapshot but no fee charge.** These may be fee waivers; a missing fee cannot be recreated without inventing a rate.
 6. **Statistical outliers are not errors.** An IQR test flags 251 client starting balances, all of them UHNW clients, as expected for a firm with very large accounts.
 

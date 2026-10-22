@@ -6,7 +6,7 @@ Evidence comes from `reports/dq_summary_raw.csv` (Part A; every check is listed 
 **Ground rules for the cleaning script**
 - Read every raw file with `dtype=str, keep_default_na=False`. Never modify the raw files.
 - One transformation at a time; after each one print rows affected and a before/after check, then `assert` the after-state.
-- Log every changed cell to `data/audit/value_changes.csv`. Removed rows go to `data/audit/quarantine_<table>.csv`. Prove `raw = clean + quarantined` for every table.
+- Log every changed cell to `data/audit/value_changes.csv`. Removed rows go to `data/audit/quarantine_<table>_<reason>.csv` (one file per quarantined set). Prove `raw = clean + quarantined` for every table.
 - Flag columns are 0/1 integers and are only *added*, never replace an original column.
 
 ---
@@ -67,7 +67,7 @@ Evidence comes from `reports/dq_summary_raw.csv` (Part A; every check is listed 
 | **Table / column** | `fact_transactions.client_id` |
 | **Evidence** | 200 rows, 200 distinct client IDs (2702-3192); `dim_client` only goes to 2525. Mix: 58 Buy, 38 Dividend, 35 Sell, 25 Deposit, 24 Advisory Fee, 20 Withdrawal. Total amount $10,888,495.37. Their `advisor_id`s are all valid. RI match rate for this relationship is 99.93%. |
 | **Dimension violated** | Referential Integrity |
-| **Decision** | **quarantine** to `data/audit/quarantine_fact_transactions.csv`, all original columns plus `quarantine_reason = "orphan client_id"`. |
+| **Decision** | **quarantine** to `data/audit/quarantine_fact_transactions_orphan_client.csv`, all original columns plus `source_table` and `quarantine_reason = "client_id not in dim_client"`. Before quarantining, assert the orphan IDs are clean integers above the highest client ID (so a format problem is not mistaken for a missing client). |
 | **Justification** | A transaction with no client cannot be attributed in any client, tier or risk-profile report. Inventing a client (or re-mapping to a similar ID) would be fabricating data. The rows are kept outside the clean table so they can be restored if the missing clients are found. |
 | **Risk** | If `dim_client` is simply missing these clients, firm-level totals are understated by $10.9M of transaction value. That figure is stated in the report so the committee knows the size of the gap. |
 
@@ -78,7 +78,7 @@ Evidence comes from `reports/dq_summary_raw.csv` (Part A; every check is listed 
 | **Table / column** | `dim_client` (whole row) |
 | **Evidence** | 25 pairs of rows identical in all 12 non-name attributes (age, city, state, zip, tier, account type, initial_aum to the cent, client_since, advisor_id...) and the same first name. Only `last_name` differs: 23 copies drop the last letter (`Lopez` / `Lope`, `Kelly` / `Kell`), 2 add an `n` (`Lee` / `Leen`, `Pace` / `Pacen`). **Cross-table check:** the copy is always the higher ID (2501-2525) and **none of the 25 copies has a single row** in fees, snapshots or transactions; every original does. |
 | **Dimension violated** | Uniqueness, Accuracy |
-| **Decision** | **quarantine** the 25 copy rows (IDs 2501-2525) to `quarantine_dim_client.csv` with `quarantine_reason = "duplicate of client_id <original>"`. Keep the original. |
+| **Decision** | **quarantine** the 25 copy rows (IDs 2501-2525) to `data/audit/quarantine_dim_client_duplicates.csv` with `quarantine_reason = "duplicate of client_id <original>"`, plus `duplicate_of` and `original_last_name` columns. Keep the original. |
 | **Justification** | Two people sharing every attribute including AUM to the cent is not plausible; the truncated surnames point to a data-entry or migration duplicate. Because the copies have no facts, removing them changes no transaction, fee or snapshot, and client counts become correct (2,500 = the number of clients that appear in the facts). |
 | **Risk** | If a pair were genuinely two people, one real client would be dropped. Mitigation: `assert` that the quarantined IDs have 0 fact rows in every fact table before removing them. |
 

@@ -55,7 +55,7 @@ TABLES = {
         "pk": "advisor_id",
         "types": {"advisor_id": "int", "years_experience": "int", "aum_target_mm": "float"},
         "allowed": {"region": ["Northeast", "Mid-Atlantic", "Southeast", "Midwest", "West", "Southwest"]},
-        "ranges": {"years_experience": (0, 50), "aum_target_mm": (0, 10000)},
+        "ranges": {"years_experience": (0, 60), "aum_target_mm": (0, 10000)},   # same bound as 03_validate.py
         "required": ["advisor_id", "first_name", "last_name", "region"],
         "near_dup_cols": ["first_name", "last_name"],
     },
