@@ -1,0 +1,145 @@
+stage,check_type,table,check,rows_checked,rows_passed,rows_failed,pass_pct,note
+raw,referential_integrity,dim_client,dim_client.advisor_id -> dim_advisor.advisor_id,2525,2525,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+raw,referential_integrity,dim_security,dim_security.benchmark_id -> dim_benchmark.benchmark_id,500,500,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+raw,referential_integrity,fact_fees,fact_fees.client_id -> dim_client.client_id,122197,122197,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+raw,referential_integrity,fact_fees,fact_fees.advisor_id -> dim_advisor.advisor_id,122197,122197,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+raw,referential_integrity,fact_portfolio_snapshot,fact_portfolio_snapshot.client_id -> dim_client.client_id,129547,129547,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+raw,referential_integrity,fact_portfolio_snapshot,fact_portfolio_snapshot.advisor_id -> dim_advisor.advisor_id,129547,129547,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+raw,referential_integrity,fact_portfolio_snapshot,fact_portfolio_snapshot.benchmark_id -> dim_benchmark.benchmark_id,129547,129547,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+raw,referential_integrity,fact_transactions,fact_transactions.client_id -> dim_client.client_id,298772,298572,200,99.933,"distinct orphan keys 200; null-key rate 0.00%; examples ['2702', '2704', '2708', '2714', '2715']"
+raw,referential_integrity,fact_transactions,fact_transactions.advisor_id -> dim_advisor.advisor_id,298772,298772,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+raw,referential_integrity,fact_transactions,fact_transactions.security_id -> dim_security.security_id,197175,0,197175,0.0,"distinct orphan keys 500; null-key rate 34.00%; examples ['1.0', '2.0', '3.0', '4.0', '5.0']"
+raw,referential_integrity,fact_fees,fact_fees.fee_date -> dim_date.date,122197,122197,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+raw,referential_integrity,fact_portfolio_snapshot,fact_portfolio_snapshot.snapshot_date -> dim_date.date,129547,129547,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+raw,referential_integrity,fact_transactions,fact_transactions.txn_date -> dim_date.date,298772,298772,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+raw,rule,dim_advisor,"years_experience in [0, 60]",25,25,0,100.0,
+raw,rule,dim_advisor,aum_target_mm > 0,25,25,0,100.0,
+raw,rule,dim_advisor,region in allowed list,25,25,0,100.0,
+raw,rule,dim_advisor,certifications from CFA/CFP/CIMA or 'None',25,25,0,100.0,
+raw,rule,dim_benchmark,name / ticker_proxy present,8,8,0,100.0,
+raw,rule,dim_client,"age in [18, 110]",2525,2525,0,100.0,
+raw,rule,dim_client,initial_aum > 0,2525,2525,0,100.0,
+raw,rule,dim_client,client_since <= 2024-12-31,2525,2525,0,100.0,
+raw,rule,dim_client,state is a USPS code,2525,2447,78,96.911,
+raw,rule,dim_client,zip_code is 5 digits,2525,2525,0,100.0,
+raw,rule,dim_client,risk_profile in allowed list,2525,2449,76,96.99,
+raw,rule,dim_client,client_tier in allowed list,2525,2525,0,100.0,
+raw,rule,dim_client,primary_account_type in allowed list,2525,2525,0,100.0,
+raw,rule,dim_client,is_active is True/False,2525,2525,0,100.0,
+raw,rule,dim_date,"quarter in [1, 4]",1827,1827,0,100.0,
+raw,rule,dim_date,"month in [1, 12]",1827,1827,0,100.0,
+raw,rule,dim_date,"week_of_year in [1, 53]",1827,1827,0,100.0,
+raw,rule,dim_date,is_* flags are 0/1,1827,1827,0,100.0,
+raw,rule,dim_date,fixed-date market holiday is not a trading day,9,0,9,0.0,known limitation (decision log L08) - expected to fail in both stages
+raw,rule,dim_date,weekend is never a trading day,1827,1827,0,100.0,
+raw,rule,dim_security,asset_class in allowed list,500,500,0,100.0,
+raw,rule,dim_security,"expense_ratio_bps in [0, 300]",219,219,0,100.0,
+raw,rule,dim_security,ETF has expense ratio; stock has none,500,500,0,100.0,
+raw,rule,dim_security,ticker is 1-5 capital letters,500,500,0,100.0,
+raw,rule,fact_fees,fee_type in allowed list,122197,122197,0,100.0,
+raw,rule,fact_fees,aum_basis > 0,122197,122197,0,100.0,
+raw,rule,fact_fees,"bps_charged in (0, 300]",122197,122197,0,100.0,
+raw,rule,fact_fees,amount >= 0,122197,122197,0,100.0,
+raw,rule,fact_fees,fee_date is 1st of month,122197,122197,0,100.0,
+raw,rule,fact_portfolio_snapshot,aum > 0,129547,129547,0,100.0,
+raw,rule,fact_portfolio_snapshot,"cash_pct in [0, 1]",129547,129547,0,100.0,
+raw,rule,fact_portfolio_snapshot,return_ytd numeric and >= -100%,129547,129247,300,99.768,
+raw,rule,fact_portfolio_snapshot,benchmark_return_ytd >= -100%,129547,129547,0,100.0,
+raw,rule,fact_portfolio_snapshot,"month in [1, 12], year in [2020, 2024]",129547,129547,0,100.0,
+raw,rule,fact_portfolio_snapshot,account_type in allowed list,129547,129547,0,100.0,
+raw,rule,fact_portfolio_snapshot,snapshot_date is 1st of month,129547,129547,0,100.0,
+raw,rule,fact_transactions,txn_type in allowed list,298772,298772,0,100.0,
+raw,rule,fact_transactions,amount > 0 (sign carried by txn_type),298772,298772,0,100.0,
+raw,rule,fact_transactions,shares > 0 on security transactions,197175,196339,836,99.576,
+raw,rule,fact_transactions,price > 0 on security transactions,197175,197175,0,100.0,
+raw,rule,fact_transactions,security fields present iff Buy/Sell/Dividend,298772,298772,0,100.0,
+raw,reconciliation,fact_fees,R1 amount = aum_basis x bps / 10000 / 12,122197,122197,0,100.0,
+raw,reconciliation,fact_fees,R2 aum_basis = fact_portfolio_snapshot.aum (same client-month),122197,122197,0,100.0,0 fees without a matching snapshot
+raw,reconciliation,fact_transactions,R3 amount = shares x price (security txns),197175,196339,836,99.576,
+raw,reconciliation,fact_portfolio_snapshot,R4 active_alpha_ytd = return_ytd - benchmark_return_ytd,129547,129247,300,99.768,
+raw,reconciliation,fact_fees,R5 advisor_id = dim_client.advisor_id,122197,122197,0,100.0,0 rows with no client to compare
+raw,reconciliation,fact_portfolio_snapshot,R5 advisor_id = dim_client.advisor_id,129547,129547,0,100.0,0 rows with no client to compare
+raw,reconciliation,fact_transactions,R5 advisor_id = dim_client.advisor_id,298572,298572,0,100.0,200 rows with no client to compare
+raw,reconciliation,fact_portfolio_snapshot,R6 benchmark_id follows dim_client.risk_profile,125605,125605,0,100.0,3942 snapshot rows not tested: no usable profile
+raw,reconciliation,fact_portfolio_snapshot,R7 account_type = dim_client.primary_account_type,129547,129547,0,100.0,
+raw,reconciliation,dim_client,R8 first snapshot month = client_since month (or Jan-2020),2500,2500,0,100.0,
+raw,reconciliation,fact_fees,R9 no fee before the client_since month,122197,122197,0,100.0,
+raw,reconciliation,fact_transactions,R10 no transaction before client_since,298572,298572,0,100.0,
+raw,iqr_outlier,fact_transactions,IQR 1.5x fence on amount,298772,291548,7224,97.582,"Q1=12,078.93 Q3=81,827.01 fence=[-92,543.19, 186,449.13]; 7,224 rows flagged (2.4%); 26 of them also fail a rule or reconciliation"
+raw,iqr_outlier,fact_fees,IQR 1.5x fence on amount,122197,110856,11341,90.719,"Q1=188.60 Q3=1,597.44 fence=[-1,924.66, 3,710.70]; 11,341 rows flagged (9.3%); 0 of them also fail a rule or reconciliation"
+raw,iqr_outlier,fact_portfolio_snapshot,IQR 1.5x fence on aum,129547,116286,13261,89.764,"Q1=255,418.05 Q3=2,923,874.38 fence=[-3,747,266.43, 6,926,558.87]; 13,261 rows flagged (10.2%); 37 of them also fail a rule or reconciliation"
+raw,iqr_outlier,dim_client,IQR 1.5x fence on initial_aum,2525,2272,253,89.98,"Q1=230,337.92 Q3=2,547,458.93 fence=[-3,245,343.60, 6,023,140.45]; 253 rows flagged (10.0%); 16 of them also fail a rule or reconciliation; flagged by tier {'UHNW': 253}"
+clean,referential_integrity,dim_client,dim_client.advisor_id -> dim_advisor.advisor_id,2500,2500,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+clean,referential_integrity,dim_security,dim_security.benchmark_id -> dim_benchmark.benchmark_id,500,500,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+clean,referential_integrity,fact_fees,fact_fees.client_id -> dim_client.client_id,122197,122197,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+clean,referential_integrity,fact_fees,fact_fees.advisor_id -> dim_advisor.advisor_id,122197,122197,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+clean,referential_integrity,fact_portfolio_snapshot,fact_portfolio_snapshot.client_id -> dim_client.client_id,129547,129547,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+clean,referential_integrity,fact_portfolio_snapshot,fact_portfolio_snapshot.advisor_id -> dim_advisor.advisor_id,129547,129547,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+clean,referential_integrity,fact_portfolio_snapshot,fact_portfolio_snapshot.benchmark_id -> dim_benchmark.benchmark_id,129547,129547,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+clean,referential_integrity,fact_transactions,fact_transactions.client_id -> dim_client.client_id,298572,298572,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+clean,referential_integrity,fact_transactions,fact_transactions.advisor_id -> dim_advisor.advisor_id,298572,298572,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+clean,referential_integrity,fact_transactions,fact_transactions.security_id -> dim_security.security_id,197044,197044,0,100.0,distinct orphan keys 0; null-key rate 34.00%; examples []
+clean,referential_integrity,fact_fees,fact_fees.fee_date -> dim_date.date,122197,122197,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+clean,referential_integrity,fact_portfolio_snapshot,fact_portfolio_snapshot.snapshot_date -> dim_date.date,129547,129547,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+clean,referential_integrity,fact_transactions,fact_transactions.txn_date -> dim_date.date,298572,298572,0,100.0,distinct orphan keys 0; null-key rate 0.00%; examples []
+clean,rule,dim_advisor,"years_experience in [0, 60]",25,25,0,100.0,
+clean,rule,dim_advisor,aum_target_mm > 0,25,25,0,100.0,
+clean,rule,dim_advisor,region in allowed list,25,25,0,100.0,
+clean,rule,dim_advisor,certifications from CFA/CFP/CIMA or 'None',25,25,0,100.0,
+clean,rule,dim_benchmark,name / ticker_proxy present,8,8,0,100.0,
+clean,rule,dim_client,"age in [18, 110]",2500,2500,0,100.0,
+clean,rule,dim_client,initial_aum > 0,2500,2500,0,100.0,
+clean,rule,dim_client,client_since <= 2024-12-31,2500,2500,0,100.0,
+clean,rule,dim_client,state is a USPS code,2500,2500,0,100.0,
+clean,rule,dim_client,zip_code is 5 digits,2500,2500,0,100.0,
+clean,rule,dim_client,risk_profile in allowed list,2500,2500,0,100.0,
+clean,rule,dim_client,client_tier in allowed list,2500,2500,0,100.0,
+clean,rule,dim_client,primary_account_type in allowed list,2500,2500,0,100.0,
+clean,rule,dim_client,is_active is True/False,2500,2500,0,100.0,
+clean,rule,dim_date,"quarter in [1, 4]",1827,1827,0,100.0,
+clean,rule,dim_date,"month in [1, 12]",1827,1827,0,100.0,
+clean,rule,dim_date,"week_of_year in [1, 53]",1827,1827,0,100.0,
+clean,rule,dim_date,is_* flags are 0/1,1827,1827,0,100.0,
+clean,rule,dim_date,fixed-date market holiday is not a trading day,9,0,9,0.0,known limitation (decision log L08) - expected to fail in both stages
+clean,rule,dim_date,weekend is never a trading day,1827,1827,0,100.0,
+clean,rule,dim_security,asset_class in allowed list,500,500,0,100.0,
+clean,rule,dim_security,"expense_ratio_bps in [0, 300]",219,219,0,100.0,
+clean,rule,dim_security,ETF has expense ratio; stock has none,500,500,0,100.0,
+clean,rule,dim_security,ticker is 1-5 capital letters,500,500,0,100.0,
+clean,rule,fact_fees,fee_type in allowed list,122197,122197,0,100.0,
+clean,rule,fact_fees,aum_basis > 0,122197,122197,0,100.0,
+clean,rule,fact_fees,"bps_charged in (0, 300]",122197,122197,0,100.0,
+clean,rule,fact_fees,amount >= 0,122197,122197,0,100.0,
+clean,rule,fact_fees,fee_date is 1st of month,122197,122197,0,100.0,
+clean,rule,fact_portfolio_snapshot,aum > 0,129547,129547,0,100.0,
+clean,rule,fact_portfolio_snapshot,"cash_pct in [0, 1]",129547,129547,0,100.0,
+clean,rule,fact_portfolio_snapshot,return_ytd numeric and >= -100%,129547,129547,0,100.0,
+clean,rule,fact_portfolio_snapshot,benchmark_return_ytd >= -100%,129547,129547,0,100.0,
+clean,rule,fact_portfolio_snapshot,"month in [1, 12], year in [2020, 2024]",129547,129547,0,100.0,
+clean,rule,fact_portfolio_snapshot,account_type in allowed list,129547,129547,0,100.0,
+clean,rule,fact_portfolio_snapshot,snapshot_date is 1st of month,129547,129547,0,100.0,
+clean,rule,fact_transactions,txn_type in allowed list,298572,298572,0,100.0,
+clean,rule,fact_transactions,amount > 0 (sign carried by txn_type),298572,298572,0,100.0,
+clean,rule,fact_transactions,shares > 0 on security transactions,197044,197044,0,100.0,
+clean,rule,fact_transactions,price > 0 on security transactions,197044,197044,0,100.0,
+clean,rule,fact_transactions,security fields present iff Buy/Sell/Dividend,298572,298572,0,100.0,
+clean,rule,dim_client,risk_profile_imputed is 0/1 and = 1 only on Balanced (D05),2500,2500,0,100.0,
+clean,rule,fact_portfolio_snapshot,"aum_floor_flag = (aum == 1,000.00) (D08)",129547,129547,0,100.0,
+clean,rule,fact_fees,"aum_floor_flag = (aum_basis == 1,000.00) (D08)",122197,122197,0,100.0,
+clean,rule,fact_portfolio_snapshot,extreme_return_flag = return_ytd > +100% or < -50% (D09),129547,129547,0,100.0,
+clean,reconciliation,fact_fees,R1 amount = aum_basis x bps / 10000 / 12,122197,122197,0,100.0,
+clean,reconciliation,fact_fees,R2 aum_basis = fact_portfolio_snapshot.aum (same client-month),122197,122197,0,100.0,0 fees without a matching snapshot
+clean,reconciliation,fact_transactions,R3 amount = shares x price (security txns),197044,197044,0,100.0,
+clean,reconciliation,fact_portfolio_snapshot,R4 active_alpha_ytd = return_ytd - benchmark_return_ytd,129547,129547,0,100.0,
+clean,reconciliation,fact_fees,R5 advisor_id = dim_client.advisor_id,122197,122197,0,100.0,0 rows with no client to compare
+clean,reconciliation,fact_portfolio_snapshot,R5 advisor_id = dim_client.advisor_id,129547,129547,0,100.0,0 rows with no client to compare
+clean,reconciliation,fact_transactions,R5 advisor_id = dim_client.advisor_id,298572,298572,0,100.0,0 rows with no client to compare
+clean,reconciliation,fact_portfolio_snapshot,R6 benchmark_id follows dim_client.risk_profile,125605,125605,0,100.0,3942 snapshot rows not tested: no usable profile (incl. 3942 rows of 75 clients whose profile was imputed by this rule)
+clean,reconciliation,fact_portfolio_snapshot,R7 account_type = dim_client.primary_account_type,129547,129547,0,100.0,
+clean,reconciliation,dim_client,R8 first snapshot month = client_since month (or Jan-2020),2500,2500,0,100.0,
+clean,reconciliation,fact_fees,R9 no fee before the client_since month,122197,122197,0,100.0,
+clean,reconciliation,fact_transactions,R10 no transaction before client_since,298572,298572,0,100.0,
+clean,iqr_outlier,fact_transactions,IQR 1.5x fence on amount,298572,291351,7221,97.581,"Q1=12,079.10 Q3=81,825.06 fence=[-92,539.84, 186,444.00]; 7,221 rows flagged (2.4%); 0 of them also fail a rule or reconciliation"
+clean,iqr_outlier,fact_fees,IQR 1.5x fence on amount,122197,110856,11341,90.719,"Q1=188.60 Q3=1,597.44 fence=[-1,924.66, 3,710.70]; 11,341 rows flagged (9.3%); 0 of them also fail a rule or reconciliation"
+clean,iqr_outlier,fact_portfolio_snapshot,IQR 1.5x fence on aum,129547,116286,13261,89.764,"Q1=255,418.05 Q3=2,923,874.38 fence=[-3,747,266.43, 6,926,558.87]; 13,261 rows flagged (10.2%); 0 of them also fail a rule or reconciliation"
+clean,iqr_outlier,dim_client,IQR 1.5x fence on initial_aum,2500,2249,251,89.96,"Q1=232,013.48 Q3=2,561,143.48 fence=[-3,261,681.53, 6,054,838.50]; 251 rows flagged (10.0%); 0 of them also fail a rule or reconciliation; flagged by tier {'UHNW': 251}"

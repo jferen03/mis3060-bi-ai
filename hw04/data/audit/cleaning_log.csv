@@ -1,0 +1,25 @@
+step,decision_id,table,issue,action,rows_affected,note
+1,D01,fact_transactions,security_id stored as float text ('45.0'),convert: strip trailing .0,197175,RI match 0.00% -> 100.00%
+2,D03,dim_client,"duplicate client rows (same attributes, typo'd last name)",quarantine copy (higher id),25,"verified: copies have 0 fact rows, originals all have facts -> no FK remap needed"
+3,D04,dim_client,state stored as full name,standardize to USPS code,77,per-state count = old code count + old full-name count
+4,D05,dim_client,risk_profile blank,fill 'Balanced' + risk_profile_imputed=1,75,"all snapshots of these clients use benchmark 3, which only Balanced uses (rule holds 100%)"
+5,D02,fact_transactions,client_id not in dim_client,quarantine,200,"200 distinct ids, total amount $10,888,495.37"
+6,D07,fact_transactions,negative shares on Buy,convert: absolute value,835,amount reconciles to |shares| x price for 100% of changed rows
+7,D06,fact_portfolio_snapshot,return_ytd stored as percent text,"convert: strip %, /100",300,100% reconcile to benchmark_return_ytd + active_alpha_ytd
+8,D08,fact_portfolio_snapshot,"aum sitting at 1,000.00 floor",flag aum_floor_flag=1 (value kept),420,no other source for true AUM; fee and snapshot agree 100%
+9,D08,fact_fees,"aum_basis sitting at 1,000.00 floor",flag aum_floor_flag=1 (value kept),386,no other source for true AUM; fee and snapshot agree 100%
+10,D09,fact_portfolio_snapshot,implausible YTD return,flag extreme_return_flag=1 (value kept),2639,"977 > +100%, 1662 < -50%, 252 clients; alpha identity still holds"
+11,L01,fact_portfolio_snapshot,snapshot dated before client_since,leave as is,930,the snapshot for the joining month is stamped the 1st; 0 transactions precede client_since
+12,L01,fact_fees,fee dated before client_since,leave as is,858,same month-grain effect as snapshots
+13,L02,fact_transactions,blank security_id/shares/price,leave as is,101597,structural: exactly the Deposit / Withdrawal / Advisory Fee rows (raw count)
+14,L03,dim_security,blank expense_ratio_bps on non-ETFs,leave as is,281,single stocks have no expense ratio
+15,L03,dim_security,blank sector on ETFs,leave as is,219,multi-sector funds have no single sector
+16,L04,dim_advisor,certifications = 'None',leave as is,6,"real value (no certification), kept as text"
+17,L05,dim_security,duplicate security names,leave as is,6,different tickers/asset classes - distinct securities
+18,L06,dim_advisor,shared first or last names,leave as is,4,different people
+19,L07,dim_client,zip_code with leading zero,leave as is,232,kept as text
+20,L08,dim_date,is_trading_day ignores market holidays,leave as is,1827,whole column affected; 9 fixed-date holidays marked trading; needs external calendar
+21,L09,dim_client,inactive clients with history,leave as is,176,real history
+22,L10,dim_benchmark,benchmarks unused by snapshots,leave as is,5,dimension members may be unused
+23,L11,fact_fees,snapshot client-months with no fee row,leave as is,7350,cannot recompute a fee that was never charged
+24,L12,fact_portfolio_snapshot,clients with < 60 snapshots,leave as is,1056,joined after Jan-2020
