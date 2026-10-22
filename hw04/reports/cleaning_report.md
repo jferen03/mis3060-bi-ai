@@ -63,4 +63,4 @@ For every table, raw rows = clean rows + quarantined rows.
 6. **Statistical outliers are not errors.** An IQR test flags 251 client starting balances, all of them UHNW clients, as expected for a firm with very large accounts.
 
 ---
-*AI-assisted report — reviewed for factual accuracy on [date] by [your name]*
+*AI-assisted report — reviewed for factual accuracy on 10/21/2026 by Jack Ference*
