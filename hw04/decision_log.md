@@ -18,10 +18,10 @@ Evidence comes from `reports/dq_summary_raw.csv` (Part A) plus follow-up queries
 | D01 | fact_transactions.security_id | Integer key stored as `"45.0"` | convert | 197,175 |
 | D02 | fact_transactions.client_id | Orphan client IDs | quarantine | 200 |
 | D03 | dim_client (whole row) | Duplicate clients with typo'd last name | quarantine | 25 |
-| D04 | dim_client.state | Full state names instead of USPS codes | standardize | 78 |
+| D04 | dim_client.state | Full state names instead of USPS codes | standardize | 78 raw (77 after D03) |
 | D05 | dim_client.risk_profile | Blank risk profile | fill + flag | 75 (+1 in D03) |
 | D06 | fact_portfolio_snapshot.return_ytd | Text percentages like `"9.28%"` | convert | 300 |
-| D07 | fact_transactions.shares | Negative shares on Buy rows | convert (sign) | 836 |
+| D07 | fact_transactions.shares | Negative shares on Buy rows | convert (sign) | 836 raw (835 after D02) |
 | D08 | fact_portfolio_snapshot.aum, fact_fees.aum_basis | AUM stuck at exactly 1,000.00 | flag | 420 / 386 |
 | D09 | fact_portfolio_snapshot.return_ytd | Extreme YTD returns | flag | 2,639 |
 | L01 | fact_portfolio_snapshot.snapshot_date, fact_fees.fee_date | Dated before client_since | leave as is | 930 / 858 |
@@ -89,7 +89,7 @@ Evidence comes from `reports/dq_summary_raw.csv` (Part A) plus follow-up queries
 | **Table / column** | `dim_client.state` |
 | **Evidence** | 78 rows use the full name: Pennsylvania 25, Florida 15, New York 14, New Jersey 13, California 5, Illinois 4, Texas 2. The other 2,447 rows use 2-letter codes, including all 7 of these states. |
 | **Dimension violated** | Validity, Consistency |
-| **Decision** | **standardize** to USPS codes with an explicit 7-entry map (`Pennsylvania -> PA`, ...). |
+| **Decision** | **standardize** to USPS codes with an explicit 7-entry map (`Pennsylvania -> PA`, ...). One of the 78 (a `Florida`) belongs to duplicate client 2517, which D03 quarantines first, so 77 values are changed. |
 | **Justification** | One state should be one value; otherwise a map or slicer shows "PA" and "Pennsylvania" as two places and splits the client counts. The mapping is a fixed fact, not a guess. |
 | **Risk** | Very low. Mitigation: assert every state is exactly 2 letters after the change, and that the count per state equals the old code count + the old full-name count. |
 
@@ -122,7 +122,7 @@ Evidence comes from `reports/dq_summary_raw.csv` (Part A) plus follow-up queries
 | **Table / column** | `fact_transactions.shares` |
 | **Evidence** | 836 rows with negative shares, **all `Buy`** (e.g. txn 272: shares -261.9719, price 441.71, amount 115,715.61). No Sell or Dividend row is negative. **Cross-column check:** `|shares| x price = amount` (within $0.05) for 836 of 836; with the negative sign, 0 of 836 reconcile. All amounts in the table are positive; direction is carried by `txn_type`. |
 | **Dimension violated** | Validity, Consistency |
-| **Decision** | **convert** to the absolute value. |
+| **Decision** | **convert** to the absolute value. One of the 836 (txn 298603) belongs to an orphan client and is quarantined by D02 first, so 835 values are changed. |
 | **Justification** | Amount and price both say this was a normal purchase, and the table's convention is positive quantities with the type giving direction. A negative Buy would make position and share-count totals wrong. |
 | **Risk** | If a negative Buy meant a cancelled or reversed trade, flipping the sign turns a reversal into a purchase. Against that: the amount is positive and the row reconciles as a purchase. Mitigation: log all 836 changes in `value_changes.csv` and assert none remain negative. |
 
@@ -142,7 +142,7 @@ Evidence comes from `reports/dq_summary_raw.csv` (Part A) plus follow-up queries
 | Field | Entry |
 |---|---|
 | **Table / column** | `fact_portfolio_snapshot.return_ytd` (after D06) |
-| **Evidence** | After D06: 977 rows above +100% (max 94.67 = +9,467%) and 1,662 below -50%, i.e. 2,639 rows across 252 clients. (Part A showed 976 / 1,658 because the 300 percent-text rows could not be read yet.) Benchmarks never fell below -17.1% in the same period. 37% of these 252 clients also hit the D08 floor; returns measured from a tiny base explode (client 81: AUM 1,141 -> 9,925, return_ytd 8.06). The alpha identity still holds for all of them, so they are internally consistent. |
+| **Evidence** | After D06: 977 rows above +100% (max 94.67 = +9,467%) and 1,662 below -50%, i.e. 2,639 rows across 252 clients. (Part A showed 976 / 1,658 because the 300 percent-text rows could not be read yet.) Benchmarks never fell below -24.0% in the same period. 37% of these 252 clients also hit the D08 floor; returns measured from a tiny base explode (client 81: AUM 1,141 -> 9,925, return_ytd 8.06). The alpha identity still holds for all of them, so they are internally consistent. |
 | **Dimension violated** | Accuracy / Plausibility |
 | **Decision** | **flag**: `extreme_return_flag = 1` where `return_ytd > 1.0` or `< -0.5`. Keep the value. |
 | **Justification** | These are arithmetically consistent but not believable for real portfolios, and they would dominate any average return or alpha ranking. A flag lets reports exclude them or use medians without deleting history. |
