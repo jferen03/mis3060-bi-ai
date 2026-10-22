@@ -45,7 +45,9 @@ NULL_TOKENS = {"", "none", "null", "nan", "n/a", "na", "nat", "-", "?"}
 TRUE_FALSE = {"true", "false", "0", "1", "yes", "no", "t", "f", "y", "n"}
 
 # --------------------------------------------------------------------------
-# Rule configuration (data, not code). The profiler never reads this.
+# Rule configuration (data, not code). The DQ checks read all of it; the profiler
+# reads only "types" (to measure parse failures against the expected type, and
+# infers the type itself for any column not listed).
 # type: int | float | date | bool | text
 # --------------------------------------------------------------------------
 TABLES = {
@@ -126,7 +128,7 @@ TABLES = {
                   "aum": "float", "return_ytd": "float", "benchmark_return_ytd": "float",
                   "active_alpha_ytd": "float", "cash_pct": "float"},
         "allowed": {"account_type": ["Taxable", "IRA", "Roth IRA", "Trust", "529"]},
-        "ranges": {"aum": (0, None), "return_ytd": (-1, 5), "benchmark_return_ytd": (-1, 5),
+        "ranges": {"aum": (0, None), "return_ytd": (-1, None), "benchmark_return_ytd": (-1, None),
                    "cash_pct": (0, 1), "month": (1, 12), "year": (2020, 2024)},
         "required": ["snapshot_id", "client_id", "advisor_id", "benchmark_id", "snapshot_date", "aum"],
         "grain": ["client_id", "snapshot_date"],
@@ -167,7 +169,9 @@ def find_file(data_dir, table):
     exact = os.path.join(data_dir, table + ".csv")
     if os.path.exists(exact):
         return exact
-    hits = sorted(glob.glob(os.path.join(data_dir, glob.escape(table) + " (*).csv")))
+    hits = glob.glob(os.path.join(data_dir, glob.escape(table) + " (*).csv"))
+    # sort by the number in "(n)" so "(10)" comes after "(9)"
+    hits = sorted(hits, key=lambda h: int(re.search(r"\((\d+)\)\.csv$", h).group(1)))
     if len(hits) > 1:
         print(f"  WARNING: several files match {table}; using {os.path.basename(hits[-1])}")
     return hits[-1] if hits else None
@@ -227,7 +231,7 @@ def infer_type(s):
     for typ in ("int", "float", "date"):
         if parse_ok(vals, typ).mean() >= 0.95:
             # leading-zero codes (zip codes, account numbers) are text, not numbers
-            if typ == "int" and vals.str.match(r"^0\d").any():
+            if typ == "int" and vals.str.strip().str.match(r"^0\d").any():
                 return "text"
             return typ
     # IDs stored as '45.0' are integers in disguise
@@ -274,7 +278,8 @@ def profile_table(name, df, expected_types=None):
         int_as_float = int(vals.str.match(INT_AS_FLOAT_RE).sum()) if expected == "int" else 0
 
         mixed = []
-        if expected in ("int", "float", "date") and n_shapes_1pct > 1 and expected == "date":
+        # shapes only signal mixed formats for dates; numbers differ in digit count naturally
+        if expected == "date" and n_shapes_1pct > 1:
             mixed.append(f"{n_shapes_1pct} date shapes")
         if int_as_float:
             mixed.append(f"{int_as_float} ints stored as 'n.0'")
@@ -289,7 +294,7 @@ def profile_table(name, df, expected_types=None):
             if nums.notna().any():
                 num_min, num_max, num_mean = nums.min(), nums.max(), round(nums.mean(), 4)
         elif expected == "date":
-            d = vals[parse_ok(vals, "date")]
+            d = vals[parse_ok(vals, "date")].str.strip()
             if len(d):
                 num_min, num_max = d.min(), d.max()
 
@@ -328,13 +333,24 @@ def profile_table(name, df, expected_types=None):
 # --------------------------------------------------------------------------
 FINDINGS = []
 
+# Tolerances for recomputed values (half a unit of the stored precision, rounded up):
+TOL_CENTS = 0.02         # money stored to 2 decimals (fees); allows rounding of a product
+TOL_TRADE = 0.05         # trade amount = shares (4 dp) x price (2 dp): rounding error up to ~$0.05
+TOL_RETURN_EXACT = 2e-6  # returns stored to 6 dp: a - b - c can be off by 1.5e-6 from rounding
+TOL_RETURN_PCT = 1e-4    # '9.28%' has only 2 dp of a percent = 4 dp of a decimal
+SECURITY_TXN_TYPES = ["Buy", "Sell", "Dividend"]
+
 
 def add(group, table, column, check, severity, affected, total, detail, examples=None):
-    if affected == 0 and severity != "INFO":
-        return
+    """Record every check, passed or not. status=PASS means 0 rows affected, so a check
+    that ran and passed is visible and different from a check that never ran."""
+    if severity == "INFO":
+        status = "INFO"
+    else:
+        status = "FAIL" if affected else "PASS"
     FINDINGS.append({
         "check_group": group, "table": table, "column": column, "check": check,
-        "severity": severity, "rows_affected": int(affected), "total_rows": int(total),
+        "severity": severity, "status": status, "rows_affected": int(affected), "total_rows": int(total),
         "pct_affected": round(affected / max(total, 1) * 100, 3),
         "detail": detail,
         "examples": "" if examples is None else "; ".join(str(x) for x in list(examples)[:5]),
@@ -382,7 +398,7 @@ def column_checks(name, df, spec):
         bad = nn & ~parse_ok(vals, typ)
         if typ == "int":
             as_float = nn & vals.str.strip().str.match(INT_AS_FLOAT_RE)
-            add(g, name, col, "integer stored as float text", "WARN", as_float.sum(), n,
+            add(g, name, col, "integer stored as float text", "ERROR", as_float.sum(), n,
                 "values like '45.0' - will not match integer keys as text and import as decimal",
                 vals[as_float].unique()[:5])
             bad = bad & ~as_float
@@ -509,17 +525,25 @@ def row_contradictions(t):
     bad = weekend & (dd["is_trading_day"] == "1")
     add(g, "dim_date", "is_trading_day", "weekend marked as trading day", "ERROR", bad.sum(), len(dd),
         "Saturday/Sunday flagged 1", examples_of(dd, bad, ["date", "day_of_week"]))
-    hol = (~weekend) & (dd["is_trading_day"] == "0")
-    add(g, "dim_date", "is_trading_day", "weekday marked non-trading", "INFO", hol.sum(), len(dd),
-        "expected for market holidays (~9-10 per year); verify count is plausible",
-        examples_of(dd, hol, ["date", "day_of_week"]))
-    gaps = d.sort_values().diff().dt.days.fillna(1)
+    hol = (~weekend) & (dd["is_trading_day"].str.strip() == "0")
+    per_year = hol.groupby(d.dt.year).sum()
+    add(g, "dim_date", "is_trading_day", "weekday marked non-trading (market holidays)", "INFO", hol.sum(), len(dd),
+        f"per year: {per_year.to_dict()} - US exchanges close about 9-10 weekdays a year")
+    # fixed-date exchange holidays that fall on a weekday must not be trading days
+    fixed = d.dt.strftime("%m-%d").isin(["01-01", "07-04", "12-25"]) & ~weekend
+    bad = fixed & (dd["is_trading_day"].str.strip() == "1")
+    add(g, "dim_date", "is_trading_day", "fixed-date market holiday marked as trading day", "WARN",
+        bad.sum(), int(fixed.sum()),
+        f"New Year's Day / July 4 / Christmas on a weekday flagged 1; years with < 5 non-trading weekdays: "
+        f"{int((per_year < 5).sum())} of {len(per_year)}", examples_of(dd, bad, ["date", "day_of_week"]))
+    add(g, "dim_date", "date", "unparseable calendar date", "ERROR", int(d.isna().sum()), len(dd), "")
+    gaps = d.dropna().sort_values().diff().dt.days.iloc[1:]
     add(g, "dim_date", "date", "calendar gap", "ERROR", int((gaps != 1).sum()), len(dd),
         "calendar table should have one row per day with no gaps")
 
     # dim_security: ETF attributes must be consistent
     s = t["dim_security"]
-    etf = s["is_etf"].str.strip().str.lower() == "true"
+    etf = s["is_etf"].str.strip().str.lower().isin(["true", "1"])
     has_er = ~is_null(s["expense_ratio_bps"])
     has_sector = ~is_null(s["sector"])
     add(g, "dim_security", "expense_ratio_bps", "ETF without expense ratio", "ERROR",
@@ -529,7 +553,9 @@ def row_contradictions(t):
     add(g, "dim_security", "expense_ratio_bps / sector", "blank is structural (not a defect)", "INFO",
         int((~etf & ~has_er).sum() + (etf & ~has_sector).sum()), len(s),
         f"non-ETFs w/o expense ratio: {(~etf & ~has_er).sum()}; ETFs w/o sector: {(etf & ~has_sector).sum()}"
-        " - blanks line up exactly with is_etf, so they are legitimate structure")
+        + (" - blanks line up exactly with is_etf, so they are legitimate structure"
+           if (etf & ~has_er).sum() == 0 and (~etf & has_er).sum() == 0 and (~etf & ~has_sector).sum() == 0
+           else " - blanks do NOT line up exactly with is_etf: see the ETF/stock findings above"))
     add(g, "dim_security", "sector", "stock without sector", "WARN", (~etf & ~has_sector).sum(), len(s),
         "single stocks should have a GICS sector")
 
@@ -537,7 +563,9 @@ def row_contradictions(t):
     f = t["fact_fees"]
     calc = to_num(f["aum_basis"]) * to_num(f["bps_charged"]) / 10000 / 12
     diff = (calc - to_num(f["amount"])).abs()
-    bad = diff > 0.02
+    bad = diff > TOL_CENTS
+    add(g, "fact_fees", "amount", "fee identity not checkable (unparseable inputs)", "ERROR", int(diff.isna().sum()),
+        len(f), "rows where aum_basis, bps_charged or amount is not a number are reported here, not skipped")
     add(g, "fact_fees", "amount", "amount != aum_basis x bps / 10000 / 12", "ERROR", bad.sum(), len(f),
         f"max abs difference {diff.max():.4f}", examples_of(f, bad, ["fee_id", "aum_basis", "bps_charged", "amount"]))
 
@@ -551,17 +579,21 @@ def row_contradictions(t):
     add(g, "fact_portfolio_snapshot", "snapshot_date", "snapshot not on 1st of month", "WARN",
         (pdte.dt.day != 1).sum(), len(p), "monthly snapshots are dated the 1st")
     alpha = to_num(p["return_ytd"]) - to_num(p["benchmark_return_ytd"]) - to_num(p["active_alpha_ytd"])
-    bad = alpha.abs() > 2e-6
+    bad = alpha.abs() > TOL_RETURN_EXACT
+    add(g, "fact_portfolio_snapshot", "active_alpha_ytd", "alpha identity not checkable (unparseable inputs)",
+        "ERROR", int(alpha.isna().sum()), len(p), "see the percent-formatted text finding below")
     add(g, "fact_portfolio_snapshot", "active_alpha_ytd", "alpha != return_ytd - benchmark_return_ytd",
-        "ERROR", bad.sum(), len(p), f"max abs difference {alpha.abs().max():.2e}",
+        "ERROR", bad.sum(), len(p), f"max abs difference {alpha.abs().max():.2e} (parseable rows)",
         examples_of(p, bad, ["snapshot_id", "return_ytd", "benchmark_return_ytd", "active_alpha_ytd"]))
     # percent-formatted text ('9.28%'): does value/100 reconcile with bench + alpha?
     pct = p["return_ytd"].str.strip().str.endswith("%")
     pct_val = to_num(p["return_ytd"].str.replace("%", "", regex=False)) / 100
-    recon = (pct_val - to_num(p["benchmark_return_ytd"]) - to_num(p["active_alpha_ytd"])).abs() <= 1e-4
+    recon = (pct_val - to_num(p["benchmark_return_ytd"]) - to_num(p["active_alpha_ytd"])).abs() <= TOL_RETURN_PCT
+    n_ok = int((pct & recon).sum())
     add(g, "fact_portfolio_snapshot", "return_ytd", "percent-formatted text ('n%')", "ERROR", pct.sum(), len(p),
-        f"{(pct & recon).sum()} of {pct.sum()} reconcile to benchmark + alpha after stripping % and /100 "
-        "- so the value is right, only the format is wrong (this row is skipped by the alpha check above)",
+        f"{n_ok} of {pct.sum()} reconcile to benchmark + alpha after stripping % and /100"
+        + (" - so the value is right, only the format is wrong" if n_ok == pct.sum()
+           else f" - {pct.sum() - n_ok} do NOT reconcile, so the value itself may be wrong"),
         examples_of(p, pct, ["snapshot_id", "return_ytd", "benchmark_return_ytd", "active_alpha_ytd"]))
     r = to_num(p["return_ytd"])
     big = r > 1
@@ -574,16 +606,21 @@ def row_contradictions(t):
         f"{p.loc[bad, 'client_id'].nunique()} clients; benchmarks never fell below "
         f"{to_num(p['benchmark_return_ytd']).min():.1%}",
         examples_of(p, bad, ["snapshot_id", "client_id", "snapshot_date", "aum", "return_ytd"]))
-    a = to_num(p["aum"])
-    floor = a == a.min()
-    add(g, "fact_portfolio_snapshot", "aum", "aum sitting at a floor value", "WARN", floor.sum(), len(p),
-        f"{floor.sum()} rows exactly {a.min()} - looks like a system floor/placeholder, not a market value",
-        examples_of(p, floor, ["snapshot_id", "client_id", "snapshot_date", "aum"]))
+    # a floor = the column minimum repeated many times (a real market value rarely repeats to the cent)
+    for tname, col, keycols in [("fact_portfolio_snapshot", "aum", ["snapshot_id", "client_id", "snapshot_date"]),
+                                ("fact_fees", "aum_basis", ["fee_id", "client_id", "fee_date"])]:
+        df = t[tname]
+        a = to_num(df[col])
+        floor = a == a.min()
+        sev = "WARN" if floor.sum() >= 10 else "INFO"
+        add(g, tname, col, f"{col} sitting at a floor value", sev, floor.sum(), len(df),
+            f"{floor.sum()} rows exactly {a.min()} - looks like a system floor/placeholder, not a market value",
+            examples_of(df, floor, keycols + [col]))
 
     # fact_transactions: trade fields present only for security transactions; amount = shares x price
     x = t["fact_transactions"]
     typ = x["txn_type"].str.strip()
-    sec_types = typ.isin(["Buy", "Sell", "Dividend"])
+    sec_types = typ.isin(SECURITY_TXN_TYPES)
     has_sec = ~is_null(x["security_id"])
     has_sp = ~is_null(x["shares"]) & ~is_null(x["price"])
     add(g, "fact_transactions", "security_id", "security trade missing security/shares/price", "ERROR",
@@ -600,11 +637,11 @@ def row_contradictions(t):
         " - direction is carried by txn_type, amount is positive",
         examples_of(x, neg, ["txn_id", "txn_type", "shares", "price", "amount"]))
     diff = (sh.abs() * pr - am).abs()
-    bad = sec_types & (diff > 0.05)
+    bad = sec_types & (diff > TOL_TRADE)
     add(g, "fact_transactions", "amount", "amount != |shares| x price", "ERROR", bad.sum(), len(x),
         f"max abs difference {diff[sec_types].max():.2f}",
         examples_of(x, bad, ["txn_id", "txn_type", "shares", "price", "amount"]))
-    bad_signed = sec_types & ((sh * pr - am).abs() > 0.05)
+    bad_signed = sec_types & ((sh * pr - am).abs() > TOL_TRADE) & ~bad   # fails signed, passes with |shares|
     add(g, "fact_transactions", "amount", "amount != shares x price (signed)", "INFO", bad_signed.sum(), len(x),
         "rows where the stored amount only reconciles if the shares sign is flipped "
         "- evidence that the negative sign, not the amount, is the error")
@@ -676,7 +713,8 @@ def cross_table_checks(t):
         last = m.loc[inact].groupby("client_id")[dcol].max()
         add(g, ft, "client_id", "rows for inactive clients", "INFO", inact.sum(), len(f),
             f"{inact.sum()} rows / {m.loc[inact, 'client_id'].nunique()} inactive clients "
-            f"(latest activity {last.max() if len(last) else 'n/a'}) - expected history, not a defect")
+            f"(latest activity {last.max() if len(last) else 'n/a'}) - history from before they left is expected; "
+            "decide whether activity after leaving is plausible")
 
     # snapshot account_type vs client primary_account_type
     p = t["fact_portfolio_snapshot"].copy()
@@ -690,11 +728,23 @@ def cross_table_checks(t):
     xt = pd.crosstab(m["c_risk_profile"].replace("", "(blank)"), m["benchmark_id"])
     multi = (xt > 0).sum(axis=1)
     mapping = {rp: ",".join(xt.columns[xt.loc[rp] > 0]) for rp in xt.index}
+    blank_bm = mapping.get("(blank)", "")
+    used_by_known = {b for rp, bs in mapping.items() if rp != "(blank)" for b in bs.split(",")}
+    owners = [rp for rp, bs in mapping.items() if rp != "(blank)" and blank_bm in bs.split(",")]
+    if "(blank)" not in mapping:
+        verdict = "no blank risk_profile rows"
+    elif "," in blank_bm:
+        verdict = f"blank risk_profile rows use {blank_bm.count(',') + 1} benchmarks - profile cannot be recovered"
+    elif len(owners) == 1:
+        verdict = f"blank risk_profile rows all use benchmark {blank_bm}, used only by {owners[0]} - candidate fill"
+    else:
+        verdict = f"blank risk_profile rows all use benchmark {blank_bm}, shared by {owners or 'no'} profile(s) - not recoverable"
     add(g, "fact_portfolio_snapshot", "benchmark_id", "risk_profile -> benchmark mapping", "INFO", 0, len(p),
-        "observed mapping: " + "; ".join(f"{k}->{v}" for k, v in mapping.items()) +
-        " - blank risk_profile rows all carry one benchmark, which may let you recover the profile")
+        "observed mapping: " + "; ".join(f"{k}->{v}" for k, v in mapping.items()) + " - " + verdict)
+    known = multi.drop("(blank)", errors="ignore")
     add(g, "fact_portfolio_snapshot", "benchmark_id", "risk profile maps to >1 benchmark", "WARN",
-        int(multi[multi > 1].sum()), len(xt), "a client's benchmark should follow from their risk profile")
+        int((known > 1).sum()), len(known),
+        "count = risk profiles (not rows) whose snapshots use more than one benchmark")
 
     # fee aum_basis = snapshot aum for the same client-month
     f = t["fact_fees"].copy()
@@ -732,7 +782,8 @@ def cross_table_checks(t):
     # fact dates inside the calendar range
     dd = t["dim_date"]["date"]
     for ft, dcol in facts.items():
-        out = (t[ft][dcol] < dd.min()) | (t[ft][dcol] > dd.max())
+        v = t[ft][dcol].str.strip()
+        out = ~is_null(v) & ((v < dd.min()) | (v > dd.max()))
         add(g, ft, dcol, "date outside dim_date range", "ERROR", out.sum(), len(t[ft]),
             f"calendar covers {dd.min()} to {dd.max()}")
 
@@ -755,6 +806,18 @@ def main():
 
     print(f"Reading raw files from: {data_dir}")
     t = load_tables(data_dir)
+    FINDINGS.clear()                       # safe if main() is called twice
+    # every column the rules refer to must exist, or a check would silently test nothing
+    for name, spec in TABLES.items():
+        needed = {spec["pk"]} | set(spec.get("types", {})) | set(spec.get("allowed", {})) | \
+                 set(spec.get("ranges", {})) | set(spec.get("required", [])) | set(spec.get("near_dup_cols", []))
+        missing = needed - set(t[name].columns)
+        assert not missing, f"{name}: expected columns missing {sorted(missing)}"
+    # fact-date and client_since bounds come from the calendar, not from hard-coded years
+    cal = t["dim_date"]["date"].str.strip()
+    TABLES["dim_client"]["ranges"]["client_since"] = ("1990-01-01", cal.max())
+    TABLES["dim_date"]["ranges"]["date"] = (cal.min(), cal.max())
+    TABLES["fact_portfolio_snapshot"]["ranges"]["year"] = (int(cal.min()[:4]), int(cal.max()[:4]))
 
     print("\nProfiling columns ...")
     prof = []
@@ -778,11 +841,13 @@ def main():
                         key=lambda c: c.map(sev_order) if c.name == "severity" else c).reset_index(drop=True)
     dq.insert(0, "finding_id", [f"F{i + 1:03d}" for i in range(len(dq))])
     dq.to_csv(os.path.join(REPORT_DIR, "dq_summary_raw.csv"), index=False)
-    print(f"  {len(dq)} findings -> reports/dq_summary_raw.csv\n")
+    n_fail = (dq["status"] == "FAIL").sum()
+    print(f"  {len(dq)} checks recorded ({n_fail} failed, {(dq['status'] == 'PASS').sum()} passed, "
+          f"{(dq['status'] == 'INFO').sum()} INFO) -> reports/dq_summary_raw.csv\n")
 
-    print(pd.crosstab(dq["check_group"], dq["severity"]).to_string())
-    print("\nERROR and WARN findings:")
-    show = dq[dq["severity"] != "INFO"]
+    print(pd.crosstab(dq["check_group"], [dq["status"], dq["severity"]]).to_string())
+    print("\nFailed ERROR and WARN checks:")
+    show = dq[dq["status"] == "FAIL"]
     for _, r in show.iterrows():
         print(f"  [{r.severity:<5}] {r.table}.{r.column}: {r.check} - {r.rows_affected:,} rows ({r.pct_affected}%)")
 

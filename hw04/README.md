@@ -25,7 +25,7 @@ hw04/
 │       └── quarantine_fact_transactions_orphan_client.csv  200 rows
 └── reports/
     ├── profile_raw.csv            Part A - one row per column (75)
-    ├── dq_summary_raw.csv         Part A - findings tagged ERROR / WARN / INFO (52)
+    ├── dq_summary_raw.csv         Part A - 344 checks: severity ERROR/WARN/INFO + status FAIL/PASS (20 failed)
     ├── data_quality_scorecard.csv Part D - one row per table per stage (raw / clean)
     ├── validation_details.csv     Part D - every check behind the scorecard
     └── cleaning_report.md         Part E - report for the portfolio committee
@@ -74,11 +74,38 @@ Claude Desktop drafted each script; I ran and debugged it in VS Code; Claude Cod
 
 <!-- Fill in from your own Claude Code reviews: one row per thing it flagged. -->
 
-| Script | What Claude Code flagged | What I did about it |
-|---|---|---|
-| `01_profile.py` | | |
-| `02_clean.py` | | |
-| `03_validate.py` | | |
+### `01_profile.py` (14 findings)
+
+| # | Sev. | What Claude Code flagged | What I did about it |
+|---|---|---|---|
+| 1 | Medium | The holiday check could not catch the L08 defect: 0 non-trading weekdays printed as a harmless INFO line | **Fixed.** Added a WARN that tests the fixed-date exchange holidays (Jan 1, Jul 4, Dec 25) on weekdays; it now fails on 9 of 9. The INFO line shows non-trading weekdays per year. Decision log L08 cites the new WARN. |
+| 2 | Medium | `return_ytd` range `(-1, 5)` reported extreme returns as an ERROR (311 rows), duplicating the D09 WARN | **Fixed.** Range is now `>= -100%` with no upper limit (a loss can't exceed 100%; gains have no natural cap). Extreme returns are reported once, as WARN, using D09's thresholds. |
+| 3 | Medium | Conclusions were hard-coded text ("blank risk_profile rows all carry one benchmark", "blanks line up exactly", "the value is right", "not a defect") | **Fixed.** Each conclusion is now computed. The D05 line says "candidate fill" only if the blank rows use exactly one benchmark that exactly one profile uses; L03 and D06 claim a match only when the counts show it; the inactive-client line no longer pre-judges. |
+| 4 | Medium | A passed check looked the same as one that never ran; unparseable values dropped out silently; no assertions | **Fixed.** Every check is saved with `status` PASS / FAIL / INFO (344 checks, 290 PASS), so decision-log Part 3 traces to the file. Unparseable inputs to the fee and alpha identities are now their own ERROR (300 rows for alpha = the D06 rows). The script asserts that every column the rules use exists. **Not done:** asserting raw row counts. The profiler is generic and must run on any extract; counts are proven in `02_clean.py` (raw = clean + quarantined). |
+| 5 | Low | Docstring said the profiler never reads the config, but it reads `types` | **Fixed** the comment. |
+| 6 | Low | Redundant condition: mixed shapes never reported for numbers | **Fixed** (simplified to dates only). Shapes are deliberately not used for numbers: `99` vs `999` differs in digit count, not format. Numeric format problems are caught by the `n.0` and `$ , %` checks. |
+| 7 | Low | `bad_signed` counted every signed mismatch, not "only reconciles when flipped" | **Fixed** (`& ~bad`). Still 836, now for the right reason. |
+| 8 | Low | "Risk profile maps to >1 benchmark" summed benchmarks, not profiles | **Fixed.** Counts profiles; result 0 of 5. |
+| 9 | Low | Integer-as-float was WARN in group 1 and ERROR in group 3 | **Fixed.** Both ERROR, matching D01. |
+| 10 | Low | Some comparisons use raw text without strip/normalise | **Left as is.** The same script's whitespace and case-variant checks pass on every column (0 rows), so normalising would not change any result; `03_validate.py` re-checks the clean data. |
+| 11 | Low | Grain wording in the log ("client + month") differs from the code (exact date) | **Fixed the log wording.** Every monthly row is dated the 1st (also a PASS check), so the two are equivalent. |
+| 12 | Low | L01 compared by day, producing 930 / 858 WARNs the log calls false alarms | **Left as is, on purpose.** Part A is the raw audit; the follow-up (decision log L01) and the month-level check R8 in `03_validate.py` show the rows are legitimate. Keeping the WARN shows how the false alarm was found and resolved. |
+| 13 | Low | Hard-coded dates, list and tolerances; floor = column minimum; no floor check on `fact_fees.aum_basis` | **Mostly fixed.** Date and year bounds now come from `dim_date`; Buy/Sell/Dividend is one constant; tolerances are named constants with a comment on each value; added the floor check to `fact_fees.aum_basis` (386 rows, matching D08). **Kept** "floor = repeated column minimum" so the check stays generic; it reports the value (1000.0). |
+| 14 | Low | Edge cases: blank date counted as out of range, gap check hid bad dates, `(10)` sorted before `(9)`, `FINDINGS` grew on a second run, missing strip | **Fixed all five.** |
+
+Claude Code also confirmed (no change needed): the near-duplicate check catches all 25 D03 copies; Dividend rows reconcile to shares x price; counts 836 (D07), 386 (D08) and 1,305 / 522 trading days (L08) match the decision log.
+
+### `02_clean.py`
+
+| # | Sev. | What Claude Code flagged | What I did about it |
+|---|---|---|---|
+| | | | |
+
+### `03_validate.py`
+
+| # | Sev. | What Claude Code flagged | What I did about it |
+|---|---|---|---|
+| | | | |
 
 ## Commits
 

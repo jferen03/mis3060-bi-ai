@@ -1,7 +1,7 @@
 # HW4 Decision Log - Wildcat Capital
 
 **Purpose:** this log is written *before* the cleaning code. Each entry is an instruction to Claude Desktop for `scripts/02_clean.py`.
-Evidence comes from `reports/dq_summary_raw.csv` (Part A) plus follow-up queries on the raw files. Every number below was produced by a script, not estimated.
+Evidence comes from `reports/dq_summary_raw.csv` (Part A; every check is listed there with `status` FAIL / PASS / INFO) plus follow-up queries on the raw files. Every number below was produced by a script, not estimated.
 
 **Ground rules for the cleaning script**
 - Read every raw file with `dtype=str, keep_default_na=False`. Never modify the raw files.
@@ -234,7 +234,7 @@ Evidence comes from `reports/dq_summary_raw.csv` (Part A) plus follow-up queries
 | Field | Entry |
 |---|---|
 | **Table / column** | `dim_date.is_trading_day` |
-| **Evidence** | 1,305 trading days = every weekday; 0 weekdays are marked non-trading, so New Year's Day 2020-01-01 is flagged 1. All other date attributes (year, quarter, month, names, month/quarter/year end) recompute exactly from `date`. |
+| **Evidence** | Part A WARN: 9 of 9 fixed-date exchange holidays that fall on a weekday (New Year's Day, July 4, Christmas) are flagged as trading days. 1,305 trading days = every weekday; 0 weekdays are marked non-trading in any year, so e.g. 2020-01-01 is flagged 1. All other date attributes (year, quarter, month, names, month/quarter/year end) recompute exactly from `date`. |
 | **Dimension violated** | Accuracy |
 | **Decision** | **leave as is**; record as a known limitation. |
 | **Justification** | Fixing it needs an external exchange holiday calendar, which is outside the eight files we may use. |
@@ -288,6 +288,8 @@ Evidence comes from `reports/dq_summary_raw.csv` (Part A) plus follow-up queries
 
 ## Part 3 - Checked and passed (no action)
 
+Each row below is a `status = PASS` check in `reports/dq_summary_raw.csv` (or a reconciliation in `reports/validation_details.csv`).
+
 | Check | Result |
 |---|---|
 | Primary keys unique and non-blank (all 8 tables) | Pass |
@@ -299,7 +301,7 @@ Evidence comes from `reports/dq_summary_raw.csv` (Part A) plus follow-up queries
 | Snapshot `account_type` = client `primary_account_type` | 0 mismatches |
 | Snapshot `year` / `month` agree with `snapshot_date` | 0 mismatches |
 | All fact dates exist in `dim_date` | 100% |
-| Grain duplicates (client + month in snapshots, client + month + type in fees) | 0 |
+| Grain duplicates (client + snapshot_date in snapshots, client + fee_date + fee_type in fees; every monthly row is dated the 1st, so this is the same as client + month) | 0 |
 
 ---
 
